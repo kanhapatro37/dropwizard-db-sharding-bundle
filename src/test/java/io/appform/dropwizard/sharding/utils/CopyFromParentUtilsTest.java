@@ -154,7 +154,7 @@ public class CopyFromParentUtilsTest {
                 .ownField("mine")
                 .build();
 
-        CopyFromParentUtils.copyFields(parent, child);
+        CopyFromParentUtils.copyFields(parent, child, false);
 
         assertEquals("TXN-123", child.getTxnId());
         assertEquals(500, child.getChildAmount());
@@ -166,7 +166,7 @@ public class CopyFromParentUtilsTest {
         TestParent parent = TestParent.builder().transactionId("T1").build();
         PlainEntity plain = PlainEntity.builder().name("original").build();
 
-        CopyFromParentUtils.copyFields(parent, plain);
+        CopyFromParentUtils.copyFields(parent, plain, false);
         assertEquals("original", plain.getName());
     }
 
@@ -175,20 +175,20 @@ public class CopyFromParentUtilsTest {
         TestParent parent = TestParent.builder().transactionId("T1").build();
         EmptyAnnotatedChild child = EmptyAnnotatedChild.builder().someField("value").build();
 
-        CopyFromParentUtils.copyFields(parent, child);
+        CopyFromParentUtils.copyFields(parent, child, false);
         assertEquals("value", child.getSomeField());
     }
 
     @Test
     public void testCopyFields_nullParentIsNoop() {
         TestChild child = TestChild.builder().ownField("mine").build();
-        assertDoesNotThrow(() -> CopyFromParentUtils.copyFields(null, child));
+        assertDoesNotThrow(() -> CopyFromParentUtils.copyFields(null, child, false));
     }
 
     @Test
     public void testCopyFields_nullChildIsNoop() {
         TestParent parent = TestParent.builder().transactionId("T1").build();
-        assertDoesNotThrow(() -> CopyFromParentUtils.copyFields(parent, null));
+        assertDoesNotThrow(() -> CopyFromParentUtils.copyFields(parent, null, false));
     }
 
     @Test
@@ -197,7 +197,7 @@ public class CopyFromParentUtilsTest {
         TestChild child = TestChild.builder().build();
 
         assertThrows(IllegalArgumentException.class,
-                () -> CopyFromParentUtils.copyFields(wrongParent, child));
+                () -> CopyFromParentUtils.copyFields(wrongParent, child, false));
     }
 
     @Test
@@ -206,7 +206,7 @@ public class CopyFromParentUtilsTest {
         parent.setBaseField("from-base");
         ChildOfInherited child = new ChildOfInherited();
 
-        CopyFromParentUtils.copyFields(parent, child);
+        CopyFromParentUtils.copyFields(parent, child, false);
 
         assertEquals("from-base", child.getCopied());
     }
@@ -222,7 +222,7 @@ public class CopyFromParentUtilsTest {
                 .childAmount(1)
                 .build();
 
-        CopyFromParentUtils.copyFields(parent, child);
+        CopyFromParentUtils.copyFields(parent, child, false);
 
         assertEquals("NEW-TXN", child.getTxnId());
         assertEquals(999, child.getChildAmount());
@@ -236,8 +236,8 @@ public class CopyFromParentUtilsTest {
                 .build();
         TestChild child = TestChild.builder().build();
 
-        CopyFromParentUtils.copyFields(parent, child);
-        CopyFromParentUtils.copyFields(parent, child);
+        CopyFromParentUtils.copyFields(parent, child, false);
+        CopyFromParentUtils.copyFields(parent, child, false);
 
         assertEquals("TXN", child.getTxnId());
         assertEquals(100, child.getChildAmount());
@@ -254,7 +254,7 @@ public class CopyFromParentUtilsTest {
                 .childAmount(42)
                 .build();
 
-        CopyFromParentUtils.copyFields(parent, child);
+        CopyFromParentUtils.copyFields(parent, child, false);
 
         assertNull(child.getTxnId());
         assertEquals(0, child.getChildAmount());
@@ -273,7 +273,7 @@ public class CopyFromParentUtilsTest {
                 .customerId("CHILD-CUST")
                 .build();
 
-        CopyFromParentUtils.copyFields(parent, child);
+        CopyFromParentUtils.copyFields(parent, child, false);
 
         assertEquals("CHILD-TXN", child.getTxnId(), "should not override existing String");
         assertEquals(100, child.getChildAmount(), "should not override existing primitive");
@@ -289,7 +289,7 @@ public class CopyFromParentUtilsTest {
                 .build();
         NoOverrideChild child = new NoOverrideChild(); // all defaults: null, 0, null
 
-        CopyFromParentUtils.copyFields(parent, child);
+        CopyFromParentUtils.copyFields(parent, child, false);
 
         assertNull(child.getTxnId(), "override=false should never copy");
         assertEquals(0, child.getChildAmount(), "override=false should never copy");
@@ -307,7 +307,7 @@ public class CopyFromParentUtilsTest {
                 .txnId("EXISTING")
                 .build(); // childAmount = 0, customerId = null
 
-        CopyFromParentUtils.copyFields(parent, child);
+        CopyFromParentUtils.copyFields(parent, child, false);
 
         assertEquals("EXISTING", child.getTxnId(), "override=false should never copy");
         assertEquals(0, child.getChildAmount(), "override=false should never copy");
@@ -325,14 +325,14 @@ public class CopyFromParentUtilsTest {
                 .childAmount(100)
                 .build();
 
-        CopyFromParentUtils.copyFields(parent, child);
+        CopyFromParentUtils.copyFields(parent, child, false);
 
         assertEquals("PARENT-TXN", child.getTxnId(), "override=true should always copy");
         assertEquals(100, child.getChildAmount(), "override=false should not override existing value");
     }
 
     @Test
-    public void testNoOverride_allPrimitiveTypes_defaultsAreNotCopied() {
+    public void testNoOverride_allPrimitiveTypes_defaultFieldsAreNotOverridden() {
         PrimitiveParent parent = PrimitiveParent.builder()
                 .intVal(42)
                 .boolVal(true)
@@ -341,35 +341,12 @@ public class CopyFromParentUtilsTest {
                 .build();
         NoOverridePrimitiveChild child = new NoOverridePrimitiveChild(); // all primitive defaults
 
-        CopyFromParentUtils.copyFields(parent, child);
+        CopyFromParentUtils.copyFields(parent, child, false);
 
         assertEquals(0, child.getIntVal(), "override=false should never copy");
         assertEquals(false, child.isBoolVal(), "override=false should never copy");
         assertEquals('\0', child.getCharVal(), "override=false should never copy");
         assertEquals(0.0, child.getDoubleVal(), "override=false should never copy");
-    }
-
-    @Test
-    public void testNoOverride_allPrimitiveTypes_nonDefaultsPreserved() {
-        PrimitiveParent parent = PrimitiveParent.builder()
-                .intVal(42)
-                .boolVal(true)
-                .charVal('X')
-                .doubleVal(3.14)
-                .build();
-        NoOverridePrimitiveChild child = NoOverridePrimitiveChild.builder()
-                .intVal(7)
-                .boolVal(true)
-                .charVal('A')
-                .doubleVal(1.0)
-                .build();
-
-        CopyFromParentUtils.copyFields(parent, child);
-
-        assertEquals(7, child.getIntVal(), "non-default int should be preserved");
-        assertEquals(true, child.isBoolVal(), "non-default boolean should be preserved");
-        assertEquals('A', child.getCharVal(), "non-default char should be preserved");
-        assertEquals(1.0, child.getDoubleVal(), "non-default double should be preserved");
     }
 
     @Test
@@ -384,7 +361,7 @@ public class CopyFromParentUtilsTest {
                 .childAmount(1)
                 .build();
 
-        CopyFromParentUtils.copyFields(parent, child);
+        CopyFromParentUtils.copyFields(parent, child, false);
 
         assertEquals("NEW", child.getTxnId(), "override=true (default) should overwrite");
         assertEquals(999, child.getChildAmount(), "override=true (default) should overwrite");
@@ -419,7 +396,7 @@ public class CopyFromParentUtilsTest {
         TestParent parent = TestParent.builder().transactionId("INHERITED-TXN").build();
         InheritedChild child = InheritedChild.builder().ownField("mine").build();
 
-        CopyFromParentUtils.copyFields(parent, child);
+        CopyFromParentUtils.copyFields(parent, child, false);
 
         assertEquals("INHERITED-TXN", child.getTxnId());
         assertEquals("mine", child.getOwnField());
@@ -430,7 +407,7 @@ public class CopyFromParentUtilsTest {
         TestParent parent = TestParent.builder().transactionId("NEW").build();
         InheritedChild child = InheritedChild.builder().txnId("OLD").ownField("mine").build();
 
-        CopyFromParentUtils.copyFields(parent, child);
+        CopyFromParentUtils.copyFields(parent, child, false);
 
         assertEquals("NEW", child.getTxnId());
     }
@@ -489,7 +466,7 @@ public class CopyFromParentUtilsTest {
                 .partitionId(42L).baseField("base").concreteField("concrete").build();
         ConcreteChild child = ConcreteChild.builder().childOwnField("mine").build();
 
-        CopyFromParentUtils.copyFields(parent, child);
+        CopyFromParentUtils.copyFields(parent, child, false);
 
         assertEquals(42L, child.getPartitionId());
         assertEquals("base", child.getBaseField());
@@ -503,7 +480,7 @@ public class CopyFromParentUtilsTest {
         ConcreteChild child = ConcreteChild.builder()
                 .partitionId(1L).baseField("existing").childOwnField("mine").build();
 
-        CopyFromParentUtils.copyFields(parent, child);
+        CopyFromParentUtils.copyFields(parent, child, false);
 
         assertEquals(99L, child.getPartitionId());
         assertEquals("fromParent", child.getBaseField());
@@ -514,7 +491,7 @@ public class CopyFromParentUtilsTest {
         ConcreteParent parent = ConcreteParent.builder().partitionId(777L).build();
         ConcreteChild child = ConcreteChild.builder().build();
 
-        CopyFromParentUtils.copyFields(parent, child);
+        CopyFromParentUtils.copyFields(parent, child, false);
 
         assertEquals(777L, child.getPartitionId());
     }

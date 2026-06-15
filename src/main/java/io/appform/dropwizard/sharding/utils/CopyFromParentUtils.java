@@ -3,6 +3,7 @@ package io.appform.dropwizard.sharding.utils;
 import io.appform.dropwizard.sharding.sharding.CopyFromParent;
 import io.appform.dropwizard.sharding.sharding.ParentEntity;
 import lombok.AllArgsConstructor;
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
 import java.lang.invoke.MethodHandle;
@@ -13,6 +14,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -36,20 +38,33 @@ public final class CopyFromParentUtils {
     private static final Map<Class<?>, List<FieldHandleMapping>> CACHE = new ConcurrentHashMap<>();
     private static final List<FieldHandleMapping> NO_MAPPINGS = Collections.emptyList();
 
+    private static final Map<Class<?>, Object> PRIMITIVE_DEFAULTS = Map.of(
+            boolean.class, false,
+            char.class, '\0',
+            byte.class, (byte) 0,
+            short.class, (short) 0,
+            int.class, 0,
+            long.class, 0L,
+            float.class, 0.0f,
+            double.class, 0.0d
+    );
+
     private CopyFromParentUtils() {
         // utility class
     }
 
     /**
      * Copies annotated fields from parent to child.
+     * Only copies fields where {@code @CopyFromParent(override = true)}.
      * No-op if child class has no {@code @ParentEntity} or no {@code @CopyFromParent} fields.
      *
      * @param parent the parent entity (source of field values)
      * @param child  the child entity (target)
+     * @param copyIfDefaultOnly if true, only copy if child field has default value, otherwise log error
      * @throws IllegalArgumentException if parent type doesn't match {@code @ParentEntity} declaration
      * @throws RuntimeException         if field access fails
      */
-    public static <T, U> void copyFields(T parent, U child) {
+    public static <T, U> void copyFields(T parent, U child, boolean copyIfDefaultOnly) {
         if (parent == null || child == null) {
             return;
         }
@@ -62,7 +77,34 @@ public final class CopyFromParentUtils {
         }
 
         validateParentType(parent, child);
-        applyMappings(parent, child, mappings);
+        applyMappings(parent, child, mappings, copyIfDefaultOnly);
+    }
+
+    /**
+     * Detects all fields where the parent value differs from the child value,
+     * regardless of {@code override} flag or whether the child value is a default.
+     * <p>
+     * This is used for mismatch detection during rollout — to verify that existing
+     * manual setter logic produces the same values that the parent holds.
+     *
+     * @param parent the parent entity
+     * @param child  the child entity
+     * @return list of field mismatches (never null)
+     */
+    public static <T, U> List<FieldMismatch> detectMismatches(T parent, U child) {
+        if (parent == null || child == null) {
+            return Collections.emptyList();
+        }
+
+        List<FieldHandleMapping> mappings = CACHE.computeIfAbsent(
+                child.getClass(), CopyFromParentUtils::buildMappings);
+
+        if (mappings == NO_MAPPINGS) {
+            return Collections.emptyList();
+        }
+
+        validateParentType(parent, child);
+        return findMismatches(parent, child, mappings);
     }
 
     private static List<FieldHandleMapping> buildMappings(Class<?> childClass) {
@@ -100,10 +142,12 @@ public final class CopyFromParentUtils {
 
                 MethodHandle parentGetter = parentLookup.unreflectGetter(parentField);
                 MethodHandle childSetter = childLookup.unreflectSetter(childField);
+                MethodHandle childGetter = childLookup.unreflectGetter(childField);
 
                 result.add(new FieldHandleMapping(
-                        parentGetter, childSetter,
+                        parentGetter, childSetter, childGetter,
                         parentFieldName, childField.getName(),
+                        childField.getType(),
                         copyAnn.override()));
             } catch (IllegalAccessException e) {
                 throw new IllegalStateException(
@@ -127,14 +171,32 @@ public final class CopyFromParentUtils {
         }
     }
 
-    private static <T, U> void applyMappings(T parent, U child, List<FieldHandleMapping> mappings) {
+    private static <T, U> void applyMappings(T parent, U child, List<FieldHandleMapping> mappings, 
+                                              boolean copyIfDefaultOnly) {
         for (FieldHandleMapping m : mappings) {
             if (!m.override) {
                 continue;
             }
             try {
-                Object value = m.parentGetter.invoke(parent);
-                m.childSetter.invoke(child, value);
+                Object parentValue = m.parentGetter.invoke(parent);
+                
+                if (copyIfDefaultOnly) {
+                    // Check if child has default value
+                    Object childValue = m.childGetter.invoke(child);
+                    
+                    if (!isDefaultValue(childValue, m.childFieldType)) {
+                        // Child has non-default value - manual setter detected
+                        log.error("COPY_IF_DEFAULT_VIOLATION: Field {}.{} has non-default value [{}]. "
+                                + "Expected default value. Manual setter may still be present. "
+                                + "Parent value: [{}]. Skipping copy for this field.",
+                                child.getClass().getSimpleName(), m.childFieldName,
+                                childValue, parentValue);
+                        continue; // Skip copy for this field
+                    }
+                }
+                
+                // Copy from parent to child
+                m.childSetter.invoke(child, parentValue);
             } catch (Throwable e) {
                 throw new RuntimeException(
                         String.format("Failed to copy field %s -> %s on %s",
@@ -142,6 +204,41 @@ public final class CopyFromParentUtils {
                                 child.getClass().getSimpleName()), e);
             }
         }
+    }
+
+    /**
+     * Checks whether a value is the default for its type.
+     * For reference types: {@code null}.
+     * For primitives: exact comparison against the boxed default ({@code 0}, {@code false}, {@code '\0'}, etc.).
+     */
+    private static boolean isDefaultValue(Object value, Class<?> fieldType) {
+        if (value == null) {
+            return !fieldType.isPrimitive();
+        }
+        if (!fieldType.isPrimitive()) {
+            return false;
+        }
+        return Objects.equals(value, PRIMITIVE_DEFAULTS.get(fieldType));
+    }
+
+    private static <T, U> List<FieldMismatch> findMismatches(
+            T parent, U child, List<FieldHandleMapping> mappings) {
+        List<FieldMismatch> mismatches = new ArrayList<>();
+        for (FieldHandleMapping m : mappings) {
+            try {
+                Object parentValue = m.parentGetter.invoke(parent);
+                Object childValue = m.childGetter.invoke(child);
+                if (!Objects.equals(parentValue, childValue)) {
+                    mismatches.add(new FieldMismatch(
+                            m.parentFieldName, m.childFieldName, parentValue, childValue));
+                }
+            } catch (Throwable e) {
+                log.error("Failed to detect mismatch for field {} -> {} on {}",
+                        m.parentFieldName, m.childFieldName,
+                        child.getClass().getSimpleName(), e);
+            }
+        }
+        return mismatches;
     }
 
     private static List<Field> getAllFields(Class<?> cls) {
@@ -178,12 +275,26 @@ public final class CopyFromParentUtils {
         return null;
     }
 
+    /**
+     * Represents a mismatch between a parent field value and the corresponding child field value.
+     */
+    @Getter
+    @AllArgsConstructor
+    public static class FieldMismatch {
+        private final String parentFieldName;
+        private final String childFieldName;
+        private final Object parentValue;
+        private final Object childValue;
+    }
+
     @AllArgsConstructor
     private static class FieldHandleMapping {
         final MethodHandle parentGetter;
         final MethodHandle childSetter;
+        final MethodHandle childGetter;
         final String parentFieldName;
         final String childFieldName;
+        final Class<?> childFieldType;
         final boolean override;
     }
 }

@@ -9,7 +9,7 @@ import org.mockito.Mockito;
 
 import java.util.function.Function;
 
-public class CopyFromParentAndSaveTest {
+public class SaveWithParentTest {
 
     @Mock
     Session session;
@@ -18,7 +18,7 @@ public class CopyFromParentAndSaveTest {
     public void testApply_saverInvokedAndAfterSaveApplied() {
         Function<String, String> spiedSaver = LambdaTestUtils.spiedFunction(e -> e + "_saved");
 
-        val op = CopyFromParentAndSave.<String, Integer, Integer>builder()
+        val op = SaveWithParent.<String, Integer, Integer>builder()
                 .entity("hello")
                 .parent(42)
                 .saver(spiedSaver::apply)
@@ -28,7 +28,7 @@ public class CopyFromParentAndSaveTest {
         Assertions.assertEquals(11, op.apply(session));  // "hello_saved".length() == 11
         Assertions.assertEquals(42, op.getParent());
         Assertions.assertEquals("hello", op.getEntity());
-        Assertions.assertEquals(OpType.COPY_FROM_PARENT_AND_SAVE, op.getOpType());
+        Assertions.assertEquals(OpType.SAVE_WITH_PARENT, op.getOpType());
         Mockito.verify(spiedSaver, Mockito.times(1)).apply(Mockito.any());
     }
 
@@ -37,7 +37,7 @@ public class CopyFromParentAndSaveTest {
         // Simulates what CopyFromParentPersistor does: wrap the saver
         Function<String, String> originalSaver = LambdaTestUtils.spiedFunction(e -> e + "_original");
 
-        val op = CopyFromParentAndSave.<String, String, String>builder()
+        val op = SaveWithParent.<String, String, String>builder()
                 .entity("child")
                 .parent("parent")
                 .saver(originalSaver::apply)
@@ -53,10 +53,10 @@ public class CopyFromParentAndSaveTest {
     @Test
     public void testNullConstraints() {
         Assertions.assertThrows(NullPointerException.class, () ->
-                CopyFromParentAndSave.builder().entity(null).parent("p").saver(e -> e).build());
+                SaveWithParent.builder().entity(null).parent("p").saver(e -> e).build());
         Assertions.assertThrows(NullPointerException.class, () ->
-                CopyFromParentAndSave.builder().entity("e").parent(null).saver(e -> e).build());
+                SaveWithParent.builder().entity("e").parent(null).saver(e -> e).build());
         Assertions.assertThrows(NullPointerException.class, () ->
-                CopyFromParentAndSave.builder().entity("e").parent("p").saver(null).build());
+                SaveWithParent.builder().entity("e").parent("p").saver(null).build());
     }
 }

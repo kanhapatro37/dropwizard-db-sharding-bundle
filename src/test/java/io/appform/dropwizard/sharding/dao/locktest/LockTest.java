@@ -30,7 +30,7 @@ import io.appform.dropwizard.sharding.dao.MultiTenantRelationalDao;
 import io.appform.dropwizard.sharding.dao.RelationalDao;
 import io.appform.dropwizard.sharding.dao.UpdateOperationMeta;
 import io.appform.dropwizard.sharding.dao.interceptors.DaoClassLocalObserver;
-import io.appform.dropwizard.sharding.dao.operations.CopyFromParentAndSave;
+import io.appform.dropwizard.sharding.dao.operations.SaveWithParent;
 import io.appform.dropwizard.sharding.dao.operations.OpType;
 import io.appform.dropwizard.sharding.execution.TransactionExecutionContext;
 import io.appform.dropwizard.sharding.observers.TransactionObserver;
@@ -1380,7 +1380,7 @@ public class LockTest {
 
     @Test
     @SneakyThrows
-    public void testSaveProducesCopyFromParentAndSaveOpContext() {
+    public void testSaveProducesSaveWithParentOpContext() {
         // Wire a capturing observer into the chain to record OpContexts
         val capturedContexts = new ArrayList<TransactionExecutionContext>();
         val capturingObserver = new TransactionObserver(new TerminalTransactionObserver()) {
@@ -1411,15 +1411,15 @@ public class LockTest {
         val parent = SomeLookupObject.builder().myId("0").name("Parent 1").build();
         capturingLookupDao.save(parent);
 
-        // Before save — no CopyFromParentAndSave should exist yet
+        // Before save — no SaveWithParent should exist yet
         val noCopyContextsBefore = capturedContexts.stream()
                 .filter(ctx -> ctx.getOpContext() != null
-                        && ctx.getOpContext().getOpType() == OpType.COPY_FROM_PARENT_AND_SAVE)
+                        && ctx.getOpContext().getOpType() == OpType.SAVE_WITH_PARENT)
                 .count();
         assertEquals(0, noCopyContextsBefore,
-                "No CopyFromParentAndSave OpContext should exist before LockedContext.save()");
+                "No SaveWithParent OpContext should exist before LockedContext.save()");
 
-        // Use LockedContext.save() — should produce CopyFromParentAndSave
+        // Use LockedContext.save() — should produce SaveWithParent
         capturingLookupDao.lockAndGetExecutor("0")
                 .filter(p -> !Strings.isNullOrEmpty(p.getName()))
                 .save(capturingRelationDao, p -> SomeOtherObject.builder()
@@ -1429,15 +1429,15 @@ public class LockTest {
                 .mutate(p -> p.setName("Changed"))
                 .execute();
 
-        // Find the CopyFromParentAndSave context among captured contexts
-        val copyFromParentContexts = capturedContexts.stream()
+        // Find the SaveWithParent context among captured contexts
+        val saveWithParentContexts = capturedContexts.stream()
                 .filter(ctx -> ctx.getOpContext() != null
-                        && ctx.getOpContext().getOpType() == OpType.COPY_FROM_PARENT_AND_SAVE)
+                        && ctx.getOpContext().getOpType() == OpType.SAVE_WITH_PARENT)
                 .collect(Collectors.toList());
 
-        assertEquals(1, copyFromParentContexts.size(), "Expected exactly one CopyFromParentAndSave OpContext");
+        assertEquals(1, saveWithParentContexts.size(), "Expected exactly one SaveWithParent OpContext");
 
-        val opContext = (CopyFromParentAndSave<?, ?, ?>) copyFromParentContexts.get(0).getOpContext();
+        val opContext = (SaveWithParent<?, ?, ?>) saveWithParentContexts.get(0).getOpContext();
         assertNotNull(opContext.getEntity(), "Child entity reference must not be null");
         assertNotNull(opContext.getParent(), "Parent reference must not be null");
         assertTrue(opContext.getParent() instanceof SomeLookupObject,
@@ -1454,7 +1454,7 @@ public class LockTest {
 
     @Test
     @SneakyThrows
-    public void testSaveAllProducesCopyFromParentAndSaveOpContexts() {
+    public void testSaveAllProducesSaveWithParentOpContexts() {
         val capturedContexts = new ArrayList<TransactionExecutionContext>();
         val capturingObserver = new TransactionObserver(new TerminalTransactionObserver()) {
             @Override
@@ -1482,15 +1482,15 @@ public class LockTest {
         val parent = SomeLookupObject.builder().myId("0").name("Parent 1").build();
         capturingLookupDao.save(parent);
 
-        // Before saveAll — no CopyFromParentAndSave should exist yet
+        // Before saveAll — no SaveWithParent should exist yet
         val noCopyContextsBefore = capturedContexts.stream()
                 .filter(ctx -> ctx.getOpContext() != null
-                        && ctx.getOpContext().getOpType() == OpType.COPY_FROM_PARENT_AND_SAVE)
+                        && ctx.getOpContext().getOpType() == OpType.SAVE_WITH_PARENT)
                 .count();
         assertEquals(0, noCopyContextsBefore,
-                "No CopyFromParentAndSave OpContext should exist before LockedContext.saveAll()");
+                "No SaveWithParent OpContext should exist before LockedContext.saveAll()");
 
-        // Use LockedContext.saveAll() — should produce multiple CopyFromParentAndSave
+        // Use LockedContext.saveAll() — should produce multiple SaveWithParent
         capturingLookupDao.lockAndGetExecutor("0")
                 .filter(p -> !Strings.isNullOrEmpty(p.getName()))
                 .saveAll(capturingRelationDao,
@@ -1502,17 +1502,17 @@ public class LockTest {
                                 .collect(Collectors.toList()))
                 .execute();
 
-        val copyFromParentContexts = capturedContexts.stream()
+        val saveWithParentContexts = capturedContexts.stream()
                 .filter(ctx -> ctx.getOpContext() != null
-                        && ctx.getOpContext().getOpType() == OpType.COPY_FROM_PARENT_AND_SAVE)
+                        && ctx.getOpContext().getOpType() == OpType.SAVE_WITH_PARENT)
                 .collect(Collectors.toList());
 
-        assertEquals(3, copyFromParentContexts.size(),
-                "Expected 3 CopyFromParentAndSave OpContexts for saveAll with 3 entities");
+        assertEquals(3, saveWithParentContexts.size(),
+                "Expected 3 SaveWithParent OpContexts for saveAll with 3 entities");
 
         // Each should carry the parent and entity references
-        for (val ctx : copyFromParentContexts) {
-            val opCtx = (CopyFromParentAndSave<?, ?, ?>) ctx.getOpContext();
+        for (val ctx : saveWithParentContexts) {
+            val opCtx = (SaveWithParent<?, ?, ?>) ctx.getOpContext();
             assertNotNull(opCtx.getEntity());
             assertNotNull(opCtx.getParent());
             assertTrue(opCtx.getParent() instanceof SomeLookupObject);

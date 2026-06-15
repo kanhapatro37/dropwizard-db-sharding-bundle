@@ -25,7 +25,7 @@ import java.util.function.UnaryOperator;
  */
 @Data
 @Builder
-public class CopyFromParentAndSave<T, R, P> extends OpContext<R> {
+public class SaveWithParent<T, R, P> extends OpContext<R> {
 
   @NonNull
   private T entity;
@@ -44,7 +44,7 @@ public class CopyFromParentAndSave<T, R, P> extends OpContext<R> {
 
   @Override
   public OpType getOpType() {
-    return OpType.COPY_FROM_PARENT_AND_SAVE;
+    return OpType.SAVE_WITH_PARENT;
   }
 
   @Override

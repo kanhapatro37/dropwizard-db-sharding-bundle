@@ -2,7 +2,7 @@ package io.appform.dropwizard.sharding.observers.bucket;
 
 import com.google.common.base.Preconditions;
 import io.appform.dropwizard.sharding.dao.operations.Count;
-import io.appform.dropwizard.sharding.dao.operations.CopyFromParentAndSave;
+import io.appform.dropwizard.sharding.dao.operations.SaveWithParent;
 import io.appform.dropwizard.sharding.dao.operations.CountByQuerySpec;
 import io.appform.dropwizard.sharding.dao.operations.Get;
 import io.appform.dropwizard.sharding.dao.operations.GetAndUpdate;
@@ -262,7 +262,7 @@ public class BucketKeyPersistor implements OpContext.OpContextVisitor<Void> {
     }
 
     @Override
-    public <T, R, U> Void visit(CopyFromParentAndSave<T, R, U> opContext) {
+    public <T, R, U> Void visit(SaveWithParent<T, R, U> opContext) {
         final var oldSaver = opContext.getSaver();
         opContext.setSaver((T entity) -> {
             addBucketId(entity);
