@@ -14,12 +14,13 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Comprehensive tests for the copyIfDefaultOnly flag.
+ * Tests for the copyIfDefaultOnly flag.
  * This flag is used during migration rollout to detect lingering manual setters.
+ * When copyIfDefaultOnly=true and a non-default value is found, the operation fails.
  */
 class CopyFromParentCopyIfDefaultOnlyTest {
 
-    // Test entities
+    // Test entities with mixed primitive and reference types
     @Data
     @Builder
     @NoArgsConstructor
@@ -52,47 +53,11 @@ class CopyFromParentCopyIfDefaultOnlyTest {
         private String ownField;
     }
 
-    @Data
-    @Builder
-    @NoArgsConstructor
-    @AllArgsConstructor
-    static class PrimitiveParent {
-        private int intVal;
-        private long longVal;
-        private boolean boolVal;
-        private double doubleVal;
-        private char charVal;
-    }
-
-    @Data
-    @Builder
-    @NoArgsConstructor
-    @AllArgsConstructor
-    @ParentEntity(PrimitiveParent.class)
-    static class PrimitiveChild {
-        @CopyFromParent(field = "intVal")
-        private int intVal;
-
-        @CopyFromParent(field = "longVal")
-        private long longVal;
-
-        @CopyFromParent(field = "boolVal")
-        private boolean boolVal;
-
-        @CopyFromParent(field = "doubleVal")
-        private double doubleVal;
-
-        @CopyFromParent(field = "charVal")
-        private char charVal;
-    }
-
-    // Test: copyIfDefaultOnly=true with all default values (happy path)
-
     @Test
     void testCopyIfDefaultOnly_allDefaults_copiesSuccessfully() {
         CopyFromParentObserver observer = CopyFromParentObserver.builder()
                 .copyEnabled(true)
-                .copyIfDefaultOnly(true)  // Strict mode
+                .copyIfDefaultOnly(true)
                 .build();
 
         TestParent parent = TestParent.builder()
@@ -102,8 +67,7 @@ class CopyFromParentCopyIfDefaultOnlyTest {
                 .nullableField(42)
                 .build();
 
-        // Child has all default values
-        TestChild child = new TestChild();  
+        TestChild child = new TestChild();  // All default values
 
         SaveWithParent<TestChild, TestChild, TestParent> opContext =
                 SaveWithParent.<TestChild, TestChild, TestParent>builder()
@@ -115,17 +79,14 @@ class CopyFromParentCopyIfDefaultOnlyTest {
         TransactionExecutionContext ctx = createContext(opContext);
         TestChild result = observer.execute(ctx, () -> opContext.apply(null));
 
-        // All fields should be copied
         assertEquals("TXN-123", result.getTxnId());
         assertEquals(1000L, result.getChildAmount());
         assertEquals("CUST-1", result.getCustomerId());
         assertEquals(42, result.getNullableField());
     }
 
-    // Test: copyIfDefaultOnly=true with non-default value (manual setter detected)
-
     @Test
-    void testCopyIfDefaultOnly_nonDefaultString_skipsAndLogs() {
+    void testCopyIfDefaultOnly_nonDefaultReferenceType_throwsException() {
         CopyFromParentObserver observer = CopyFromParentObserver.builder()
                 .copyEnabled(true)
                 .copyIfDefaultOnly(true)
@@ -138,9 +99,9 @@ class CopyFromParentCopyIfDefaultOnlyTest {
                 .build();
 
         TestChild child = TestChild.builder()
-                .txnId("MANUAL-SETTER-VALUE")  // Non-default! Manual setter detected
-                .childAmount(0L)  // Default
-                .customerId(null)  // Default
+                .txnId("MANUAL-SETTER-VALUE")  // Non-default - should fail
+                .childAmount(0L)
+                .customerId(null)
                 .build();
 
         SaveWithParent<TestChild, TestChild, TestParent> opContext =
@@ -151,19 +112,17 @@ class CopyFromParentCopyIfDefaultOnlyTest {
                         .build();
 
         TransactionExecutionContext ctx = createContext(opContext);
-        TestChild result = observer.execute(ctx, () -> opContext.apply(null));
 
-        // txnId should NOT be copied (has manual setter value)
-        assertEquals("MANUAL-SETTER-VALUE", result.getTxnId(), 
-                "Should preserve manual setter value and skip copy");
+        IllegalStateException exception = assertThrows(IllegalStateException.class,
+                () -> observer.execute(ctx, () -> opContext.apply(null)));
 
-        // Other defaults should be copied
-        assertEquals(1000L, result.getChildAmount());
-        assertEquals("PARENT-CUST", result.getCustomerId());
+        assertTrue(exception.getMessage().contains("COPY_IF_DEFAULT_VIOLATION"));
+        assertTrue(exception.getMessage().contains("txnId"));
+        assertTrue(exception.getMessage().contains("MANUAL-SETTER-VALUE"));
     }
 
     @Test
-    void testCopyIfDefaultOnly_nonDefaultPrimitive_skipsAndLogs() {
+    void testCopyIfDefaultOnly_nonDefaultPrimitive_throwsException() {
         CopyFromParentObserver observer = CopyFromParentObserver.builder()
                 .copyEnabled(true)
                 .copyIfDefaultOnly(true)
@@ -176,9 +135,9 @@ class CopyFromParentCopyIfDefaultOnlyTest {
                 .build();
 
         TestChild child = TestChild.builder()
-                .txnId(null)  // Default
-                .childAmount(999L)  // Non-default! Manual setter detected
-                .customerId(null)  // Default
+                .txnId(null)
+                .childAmount(999L)  // Non-default primitive - should fail
+                .customerId(null)
                 .build();
 
         SaveWithParent<TestChild, TestChild, TestParent> opContext =
@@ -189,70 +148,19 @@ class CopyFromParentCopyIfDefaultOnlyTest {
                         .build();
 
         TransactionExecutionContext ctx = createContext(opContext);
-        TestChild result = observer.execute(ctx, () -> opContext.apply(null));
 
-        // amount should NOT be copied (has manual setter value)
-        assertEquals(999L, result.getChildAmount(), 
-                "Should preserve manual setter value and skip copy");
+        IllegalStateException exception = assertThrows(IllegalStateException.class,
+                () -> observer.execute(ctx, () -> opContext.apply(null)));
 
-        // Other defaults should be copied
-        assertEquals("TXN", result.getTxnId());
-        assertEquals("CUST", result.getCustomerId());
+        assertTrue(exception.getMessage().contains("COPY_IF_DEFAULT_VIOLATION"));
+        assertTrue(exception.getMessage().contains("childAmount"));
     }
-
-    // Test: copyIfDefaultOnly=true with mixed defaults and non-defaults
-
-    @Test
-    void testCopyIfDefaultOnly_mixedValues_copiesOnlyDefaults() {
-        CopyFromParentObserver observer = CopyFromParentObserver.builder()
-                .copyEnabled(true)
-                .copyIfDefaultOnly(true)
-                .build();
-
-        TestParent parent = TestParent.builder()
-                .transactionId("PARENT-TXN")
-                .amount(1000L)
-                .customerId("PARENT-CUST")
-                .nullableField(42)
-                .build();
-
-        TestChild child = TestChild.builder()
-                .txnId("MANUAL-1")      // Non-default - skip
-                .childAmount(0L)         // Default - copy
-                .customerId("MANUAL-2")  // Non-default - skip
-                .nullableField(null)     // Default - copy
-                .ownField("preserved")   // Not annotated - ignore
-                .build();
-
-        SaveWithParent<TestChild, TestChild, TestParent> opContext =
-                SaveWithParent.<TestChild, TestChild, TestParent>builder()
-                        .entity(child)
-                        .parent(parent)
-                        .saver(e -> e)
-                        .build();
-
-        TransactionExecutionContext ctx = createContext(opContext);
-        TestChild result = observer.execute(ctx, () -> opContext.apply(null));
-
-        // Non-defaults should be preserved (manual setters detected)
-        assertEquals("MANUAL-1", result.getTxnId());
-        assertEquals("MANUAL-2", result.getCustomerId());
-
-        // Defaults should be copied
-        assertEquals(1000L, result.getChildAmount());
-        assertEquals(42, result.getNullableField());
-
-        // Non-annotated field preserved
-        assertEquals("preserved", result.getOwnField());
-    }
-
-    // Test: copyIfDefaultOnly=false (normal mode)
 
     @Test
     void testCopyIfDefaultOnly_false_copiesEverything() {
         CopyFromParentObserver observer = CopyFromParentObserver.builder()
                 .copyEnabled(true)
-                .copyIfDefaultOnly(false)  // Normal mode
+                .copyIfDefaultOnly(false)  // Normal mode - overwrites everything
                 .build();
 
         TestParent parent = TestParent.builder()
@@ -262,9 +170,9 @@ class CopyFromParentCopyIfDefaultOnlyTest {
                 .build();
 
         TestChild child = TestChild.builder()
-                .txnId("OLD-VALUE")      // Will be overwritten
-                .childAmount(999L)        // Will be overwritten
-                .customerId("OLD-CUST")   // Will be overwritten
+                .txnId("OLD-VALUE")
+                .childAmount(999L)
+                .customerId("OLD-CUST")
                 .build();
 
         SaveWithParent<TestChild, TestChild, TestParent> opContext =
@@ -277,98 +185,16 @@ class CopyFromParentCopyIfDefaultOnlyTest {
         TransactionExecutionContext ctx = createContext(opContext);
         TestChild result = observer.execute(ctx, () -> opContext.apply(null));
 
-        // All fields should be overwritten (normal copy behavior)
         assertEquals("PARENT-TXN", result.getTxnId());
         assertEquals(1000L, result.getChildAmount());
         assertEquals("PARENT-CUST", result.getCustomerId());
     }
 
-    // Test: Primitive default value detection
-
-    @Test
-    void testCopyIfDefaultOnly_allPrimitivesDefault_copies() {
-        CopyFromParentObserver observer = CopyFromParentObserver.builder()
-                .copyEnabled(true)
-                .copyIfDefaultOnly(true)
-                .build();
-
-        PrimitiveParent parent = PrimitiveParent.builder()
-                .intVal(42)
-                .longVal(999L)
-                .boolVal(true)
-                .doubleVal(3.14)
-                .charVal('X')
-                .build();
-
-        PrimitiveChild child = new PrimitiveChild();  // All defaults: 0, 0L, false, 0.0, '\0'
-
-        SaveWithParent<PrimitiveChild, PrimitiveChild, PrimitiveParent> opContext =
-                SaveWithParent.<PrimitiveChild, PrimitiveChild, PrimitiveParent>builder()
-                        .entity(child)
-                        .parent(parent)
-                        .saver(e -> e)
-                        .build();
-
-        TransactionExecutionContext ctx = createContext(opContext);
-        PrimitiveChild result = observer.execute(ctx, () -> opContext.apply(null));
-
-        assertEquals(42, result.getIntVal());
-        assertEquals(999L, result.getLongVal());
-        assertTrue(result.isBoolVal());
-        assertEquals(3.14, result.getDoubleVal(), 0.001);
-        assertEquals('X', result.getCharVal());
-    }
-
-    @Test
-    void testCopyIfDefaultOnly_primitivesNonDefault_skips() {
-        CopyFromParentObserver observer = CopyFromParentObserver.builder()
-                .copyEnabled(true)
-                .copyIfDefaultOnly(true)
-                .build();
-
-        PrimitiveParent parent = PrimitiveParent.builder()
-                .intVal(42)
-                .longVal(999L)
-                .boolVal(true)
-                .doubleVal(3.14)
-                .charVal('X')
-                .build();
-
-        PrimitiveChild child = PrimitiveChild.builder()
-                .intVal(7)           // Non-default - skip
-                .longVal(0L)         // Default - copy
-                .boolVal(true)       // Non-default (true != false) - skip
-                .doubleVal(0.0)      // Default - copy
-                .charVal('A')        // Non-default - skip
-                .build();
-
-        SaveWithParent<PrimitiveChild, PrimitiveChild, PrimitiveParent> opContext =
-                SaveWithParent.<PrimitiveChild, PrimitiveChild, PrimitiveParent>builder()
-                        .entity(child)
-                        .parent(parent)
-                        .saver(e -> e)
-                        .build();
-
-        TransactionExecutionContext ctx = createContext(opContext);
-        PrimitiveChild result = observer.execute(ctx, () -> opContext.apply(null));
-
-        // Non-defaults preserved
-        assertEquals(7, result.getIntVal());
-        assertTrue(result.isBoolVal());
-        assertEquals('A', result.getCharVal());
-
-        // Defaults copied
-        assertEquals(999L, result.getLongVal());
-        assertEquals(3.14, result.getDoubleVal(), 0.001);
-    }
-
-    // Test: copyEnabled=false with copyIfDefaultOnly=true (validation only)
-
     @Test
     void testCopyDisabled_withCopyIfDefaultOnly_noEffect() {
         CopyFromParentObserver observer = CopyFromParentObserver.builder()
                 .copyEnabled(false)  // Copy disabled
-                .copyIfDefaultOnly(true)  // This should have no effect
+                .copyIfDefaultOnly(true)  // Should have no effect
                 .build();
 
         TestParent parent = TestParent.builder()
@@ -396,8 +222,6 @@ class CopyFromParentCopyIfDefaultOnlyTest {
         assertEquals(999L, result.getChildAmount());
     }
 
-    // Test: Null parent values with copyIfDefaultOnly
-
     @Test
     void testCopyIfDefaultOnly_nullParentValue_copies() {
         CopyFromParentObserver observer = CopyFromParentObserver.builder()
@@ -422,7 +246,6 @@ class CopyFromParentCopyIfDefaultOnlyTest {
         TransactionExecutionContext ctx = createContext(opContext);
         TestChild result = observer.execute(ctx, () -> opContext.apply(null));
 
-        // Null and zero values should still be copied
         assertNull(result.getTxnId());
         assertEquals(0L, result.getChildAmount());
     }

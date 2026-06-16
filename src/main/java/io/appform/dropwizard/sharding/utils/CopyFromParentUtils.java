@@ -185,18 +185,20 @@ public final class CopyFromParentUtils {
                     Object childValue = m.childGetter.invoke(child);
                     
                     if (!isDefaultValue(childValue, m.childFieldType)) {
-                        // Child has non-default value - manual setter detected
-                        log.error("COPY_IF_DEFAULT_VIOLATION: Field {}.{} has non-default value [{}]. "
-                                + "Expected default value. Manual setter may still be present. "
-                                + "Parent value: [{}]. Skipping copy for this field.",
-                                child.getClass().getSimpleName(), m.childFieldName,
-                                childValue, parentValue);
-                        continue; // Skip copy for this field
+                        // Child has non-default value - manual setter detected, fail the operation
+                        throw new IllegalStateException(
+                                String.format("COPY_IF_DEFAULT_VIOLATION: Field %s.%s has non-default value [%s]. "
+                                        + "Expected default value. Manual setter may still be present. "
+                                        + "Parent value: [%s].",
+                                        child.getClass().getSimpleName(), m.childFieldName,
+                                        childValue, parentValue));
                     }
                 }
                 
                 // Copy from parent to child
                 m.childSetter.invoke(child, parentValue);
+            } catch (IllegalStateException e) {
+                throw e;
             } catch (Throwable e) {
                 throw new RuntimeException(
                         String.format("Failed to copy field %s -> %s on %s",
