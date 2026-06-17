@@ -11,7 +11,6 @@ import java.util.List;
  * Consumers implement this interface to define what happens when a mismatch is detected
  * (e.g. publish a Foxtrot event, log a warning, increment a metric).
  * <p>
- * The listener is only invoked when mismatches are actually found (never with an empty list).
  *
  * @see CopyFromParentObserver.Builder#mismatchListener
  */
