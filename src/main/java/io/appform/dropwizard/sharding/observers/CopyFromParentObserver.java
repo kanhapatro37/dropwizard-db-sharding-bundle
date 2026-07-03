@@ -10,25 +10,31 @@ import java.util.function.Supplier;
  * saved within a {@link io.appform.dropwizard.sharding.dao.LockedContext}.
  * <p>
  * This observer is opt-in. Register it during bundle initialization:
+ *
  * <pre>
  *     dbShardingBundle.registerObserver(CopyFromParentObserver.builder()
- *         .copyEnabled(true)
- *         .mismatchDetectionEnabled(true)
- *         .mismatchListener(() -&gt; myMismatchListener)
+ *         .copyEnabled(true) //static
+ *         .mismatchDetectionEnabled(true) //static
+ *         .copyIfDefaultOnly(true) //static
+ *         .configSupplier(() -&gt; configProviderBundle.getDataProvider().getData().getCopyFromParentObserverConfig())
+ *         .mismatchListener(() -&gt; guiceBundle.getInjector().getInstance(CopyFromParentMismatchListener.class))
  *         .build());
  * </pre>
  * <p>
  * Configuration options:
+ * Priority: config > static > default
  * <ul>
  *     <li>{@code copyEnabled} — whether to copy {@code @CopyFromParent(override=true)} fields
  *         from parent to child before persistence (default: {@code true})</li>
  *     <li>{@code copyIfDefaultOnly} — when {@code true}, copy only if child field has default value,
- *         otherwise log error. Used for migration validation. (default: {@code false})</li>
+ *         otherwise fail the operation. Used for migration validation. (default: {@code false})</li>
  *     <li>{@code mismatchDetectionEnabled} — whether to detect mismatches between parent and
  *         child field values before copying (default: {@code false})</li>
  *     <li>{@code mismatchListener} — lazy supplier for the callback invoked when mismatches
  *         are detected. Required when {@code mismatchDetectionEnabled} is {@code true}.
  *         The supplier is resolved once on the first database transaction.</li>
+ *     <li>{@code configSupplier} — lazy supplier for dynamic configuration. When provided,
+ *         config values are fetched at runtime.</li>
  * </ul>
  *
  * @see CopyFromParentMismatchListener
@@ -37,21 +43,37 @@ import java.util.function.Supplier;
 @Slf4j
 public class CopyFromParentObserver extends TransactionObserver {
 
-    private final boolean copyEnabled;
-    private final boolean mismatchDetectionEnabled;
-    private final boolean copyIfDefaultOnly;
+    // For static configuration (values set at initialization via builder)
+    private final Boolean staticCopyEnabled;
+    private final Boolean staticMismatchDetectionEnabled;
+    private final Boolean staticCopyIfDefaultOnly;
+    
+    // For dynamic configuration (values fetched at runtime from config supplier)
+    private final Supplier<CopyFromParentObserverConfig> configSupplier;
+    
     private final Supplier<CopyFromParentMismatchListener> mismatchListenerSupplier;
     private volatile CopyFromParentPersistor persistor;
 
-    private CopyFromParentObserver(boolean copyEnabled,
-                                   boolean mismatchDetectionEnabled,
-                                   boolean copyIfDefaultOnly,
+    private CopyFromParentObserver(Boolean staticCopyEnabled,
+                                   Boolean staticMismatchDetectionEnabled,
+                                   Boolean staticCopyIfDefaultOnly,
+                                   Supplier<CopyFromParentObserverConfig> configSupplier,
                                    Supplier<CopyFromParentMismatchListener> mismatchListenerSupplier) {
         super(null);
-        this.copyEnabled = copyEnabled;
-        this.mismatchDetectionEnabled = mismatchDetectionEnabled;
-        this.copyIfDefaultOnly = copyIfDefaultOnly;
+        this.staticCopyEnabled = staticCopyEnabled;
+        this.staticMismatchDetectionEnabled = staticMismatchDetectionEnabled;
+        this.staticCopyIfDefaultOnly = staticCopyIfDefaultOnly;
+        this.configSupplier = configSupplier;
         this.mismatchListenerSupplier = mismatchListenerSupplier;
+    }
+    
+    /**
+     * Configuration object that needs to be provided by external config classes.
+     */
+    public interface CopyFromParentObserverConfig {
+        Boolean getCopyEnabled();
+        Boolean getMismatchDetectionEnabled();
+        Boolean getCopyIfDefaultOnly();
     }
 
     public static Builder builder() {
@@ -66,43 +88,91 @@ public class CopyFromParentObserver extends TransactionObserver {
 
     private CopyFromParentPersistor getPersistor() {
         if (persistor == null) {
-            CopyFromParentMismatchListener listener = null;
-            if (mismatchDetectionEnabled && mismatchListenerSupplier != null) {
-                try {
-                    listener = mismatchListenerSupplier.get();
-                } catch (Exception e) {
-                    log.error("Failed to resolve CopyFromParentMismatchListener, "
-                            + "mismatch detection will be disabled", e);
+            synchronized (this) {
+                if (persistor == null) {
+                    // Get resolved configuration values - either from dynamic supplier or static values
+                    boolean copyEnabled = resolveConfigValue(
+                            configSupplier != null ? () -> configSupplier.get().getCopyEnabled() : null,
+                            staticCopyEnabled,
+                            true);  // default
+                    
+                    boolean mismatchDetectionEnabled = resolveConfigValue(
+                            configSupplier != null ? () -> configSupplier.get().getMismatchDetectionEnabled() : null,
+                            staticMismatchDetectionEnabled,
+                            false);  // default
+                    
+                    boolean copyIfDefaultOnly = resolveConfigValue(
+                            configSupplier != null ? () -> configSupplier.get().getCopyIfDefaultOnly() : null,
+                            staticCopyIfDefaultOnly,
+                            false);  // default
+                    
+                    CopyFromParentMismatchListener listener = null;
+                    if (mismatchDetectionEnabled && mismatchListenerSupplier != null) {
+                        try {
+                            listener = mismatchListenerSupplier.get();
+                        } catch (Exception e) {
+                            log.error("Failed to resolve CopyFromParentMismatchListener, "
+                                    + "mismatch detection will be disabled", e);
+                        }
+                    } else if (mismatchDetectionEnabled) {
+                        throw new IllegalArgumentException(
+                                "mismatchListener must be provided when mismatchDetectionEnabled is true");
+                    }
+                    persistor = new CopyFromParentPersistor(copyEnabled, mismatchDetectionEnabled,
+                            copyIfDefaultOnly, listener);
+                    
+                    log.info("Initialized CopyFromParentPersistor with copyEnabled={}, mismatchDetectionEnabled={}, copyIfDefaultOnly={}",
+                            copyEnabled, mismatchDetectionEnabled, copyIfDefaultOnly);
                 }
             }
-            persistor = new CopyFromParentPersistor(copyEnabled, mismatchDetectionEnabled, 
-                    copyIfDefaultOnly, listener);
         }
         return persistor;
     }
+    
+    /**
+     * Resolves a configuration value in order of precedence:
+     * 1. Dynamic supplier (if available and returns non-null)
+     * 2. Static value (if non-null)
+     * 3. Default value
+     */
+    private boolean resolveConfigValue(Supplier<Boolean> dynamicSupplier, Boolean staticValue, boolean defaultValue) {
+        try {
+            if (dynamicSupplier != null) {
+                Boolean dynamicValue = dynamicSupplier.get();
+                if (dynamicValue != null) {
+                    return dynamicValue;
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Failed to fetch dynamic config value, falling back to static/default", e);
+        }
+        
+        if (staticValue != null) {
+            return staticValue;
+        }
+        
+        return defaultValue;
+    }
 
     public static class Builder {
-        private boolean copyEnabled = true;
-        private boolean mismatchDetectionEnabled = false;
-        private boolean copyIfDefaultOnly = false;
+        private Boolean copyEnabled;
+        private Boolean mismatchDetectionEnabled;
+        private Boolean copyIfDefaultOnly;
+        private Supplier<CopyFromParentObserverConfig> configSupplier;
         private Supplier<CopyFromParentMismatchListener> mismatchListenerSupplier;
 
         private Builder() {}
 
-        /**
-         * Enable or disable copying of {@code @CopyFromParent(override=true)} fields
-         * from parent to child before persistence. Default: {@code true}.
-         */
+        public Builder configSupplier(Supplier<CopyFromParentObserverConfig> configSupplier) {
+            this.configSupplier = configSupplier;
+            return this;
+        }
+
         public Builder copyEnabled(boolean copyEnabled) {
             this.copyEnabled = copyEnabled;
             return this;
         }
 
-        /**
-         * Enable or disable detection of field value mismatches between parent and child.
-         * When enabled, a {@link #mismatchListener} must also be provided.
-         * Default: {@code false}.
-         */
         public Builder mismatchDetectionEnabled(boolean mismatchDetectionEnabled) {
             this.mismatchDetectionEnabled = mismatchDetectionEnabled;
             return this;
@@ -117,6 +187,9 @@ public class CopyFromParentObserver extends TransactionObserver {
          * This is intended for migration validation to detect lingering manual setters.
          * After migration is complete, this should be set to {@code false}.
          * Default: {@code false}.
+         * <p>
+         * This sets a static value. If {@link #configSupplier} is also provided,
+         * the dynamic config value takes precedence.
          */
         public Builder copyIfDefaultOnly(boolean copyIfDefaultOnly) {
             this.copyIfDefaultOnly = copyIfDefaultOnly;
@@ -138,12 +211,14 @@ public class CopyFromParentObserver extends TransactionObserver {
         }
 
         public CopyFromParentObserver build() {
-            if (mismatchDetectionEnabled && mismatchListenerSupplier == null) {
+            // Validation: if static mismatchDetectionEnabled is true, must have listener
+            if (Boolean.TRUE.equals(mismatchDetectionEnabled) && mismatchListenerSupplier == null) {
                 throw new IllegalArgumentException(
                         "mismatchListener must be provided when mismatchDetectionEnabled is true");
             }
+            
             return new CopyFromParentObserver(copyEnabled, mismatchDetectionEnabled,
-                    copyIfDefaultOnly, mismatchListenerSupplier);
+                    copyIfDefaultOnly, configSupplier, mismatchListenerSupplier);
         }
     }
 }

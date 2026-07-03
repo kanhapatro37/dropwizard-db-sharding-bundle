@@ -543,4 +543,489 @@ class CopyFromParentObserverTest {
                 .shardName("shard-0")
                 .build();
     }
+
+    /**
+     * Simple config implementation for testing
+     */
+    @Data
+    @Builder
+    static class TestConfig implements CopyFromParentObserver.CopyFromParentObserverConfig {
+        private Boolean copyEnabled;
+        private Boolean mismatchDetectionEnabled;
+        private Boolean copyIfDefaultOnly;
+    }
+
+    @Test
+    void testConfigSupplier_copiesFields() {
+        TestConfig config = TestConfig.builder()
+                .copyEnabled(true)
+                .mismatchDetectionEnabled(false)
+                .copyIfDefaultOnly(false)
+                .build();
+
+        CopyFromParentObserver observer = CopyFromParentObserver.builder()
+                .configSupplier(() -> config)
+                .build();
+
+        TestParent parent = TestParent.builder()
+                .transactionId("TXN-123")
+                .amount(500)
+                .build();
+        TestChild child = TestChild.builder()
+                .ownField("mine")
+                .build();
+
+        SaveWithParent<TestChild, TestChild, TestParent> opContext =
+                SaveWithParent.<TestChild, TestChild, TestParent>builder()
+                        .entity(child)
+                        .parent(parent)
+                        .saver(e -> e)
+                        .build();
+
+        TransactionExecutionContext ctx = createContext(opContext);
+        TestChild result = observer.execute(ctx, () -> opContext.apply(null));
+
+        assertEquals("TXN-123", result.getTxnId(), "Field should be copied from parent via config supplier");
+        assertEquals(500, result.getChildAmount(), "Field should be copied from parent via config supplier");
+        assertEquals("mine", result.getOwnField(), "Non-annotated field should not be touched");
+    }
+
+    @Test
+    void testConfigSupplier_disablesCopying() {
+        TestConfig config = TestConfig.builder()
+                .copyEnabled(false)
+                .mismatchDetectionEnabled(false)
+                .copyIfDefaultOnly(false)
+                .build();
+
+        CopyFromParentObserver observer = CopyFromParentObserver.builder()
+                .configSupplier(() -> config)
+                .build();
+
+        TestParent parent = TestParent.builder()
+                .transactionId("PARENT-TXN")
+                .amount(500)
+                .build();
+        TestChild child = TestChild.builder()
+                .txnId("ORIGINAL-TXN")
+                .childAmount(100)
+                .build();
+
+        SaveWithParent<TestChild, TestChild, TestParent> opContext =
+                SaveWithParent.<TestChild, TestChild, TestParent>builder()
+                        .entity(child)
+                        .parent(parent)
+                        .saver(e -> e)
+                        .build();
+
+        TransactionExecutionContext ctx = createContext(opContext);
+        TestChild result = observer.execute(ctx, () -> opContext.apply(null));
+
+        assertEquals("ORIGINAL-TXN", result.getTxnId(), "Field should not be copied when config disables it");
+        assertEquals(100, result.getChildAmount(), "Field should not be copied when config disables it");
+    }
+
+    @Test
+    void testConfigSupplier_enablesMismatchDetection() {
+        CopyFromParentMismatchListener mockListener = mock(CopyFromParentMismatchListener.class);
+
+        TestConfig config = TestConfig.builder()
+                .copyEnabled(true)
+                .mismatchDetectionEnabled(true)
+                .copyIfDefaultOnly(false)
+                .build();
+
+        CopyFromParentObserver observer = CopyFromParentObserver.builder()
+                .configSupplier(() -> config)
+                .mismatchListener(() -> mockListener)
+                .build();
+
+        TestParent parent = TestParent.builder()
+                .transactionId("PARENT-TXN")
+                .amount(500)
+                .build();
+        MismatchChild child = MismatchChild.builder()
+                .txnId("CHILD-TXN")  // Mismatch
+                .childAmount(100)     // Mismatch
+                .build();
+
+        SaveWithParent<MismatchChild, MismatchChild, TestParent> opContext =
+                SaveWithParent.<MismatchChild, MismatchChild, TestParent>builder()
+                        .entity(child)
+                        .parent(parent)
+                        .saver(e -> e)
+                        .build();
+
+        TransactionExecutionContext ctx = createContext(opContext);
+        MismatchChild result = observer.execute(ctx, () -> opContext.apply(null));
+
+        // Verify mismatch detection was called
+        ArgumentCaptor<List<CopyFromParentUtils.FieldMismatch>> mismatchCaptor =
+                ArgumentCaptor.forClass(List.class);
+        verify(mockListener).onMismatches(eq(parent), eq(child), mismatchCaptor.capture());
+
+        List<CopyFromParentUtils.FieldMismatch> mismatches = mismatchCaptor.getValue();
+        assertEquals(2, mismatches.size(), "Should detect 2 mismatches via config supplier");
+
+        assertEquals("PARENT-TXN", result.getTxnId());
+        assertEquals(500, result.getChildAmount());
+    }
+
+    @Test
+    void testConfigSupplier_precedenceOverStaticValues() {
+        // Config supplier returns false, static value is true
+        // Config supplier should win
+        TestConfig config = TestConfig.builder()
+                .copyEnabled(false)
+                .mismatchDetectionEnabled(false)
+                .copyIfDefaultOnly(false)
+                .build();
+
+        CopyFromParentObserver observer = CopyFromParentObserver.builder()
+                .copyEnabled(true)  // Static value - should be overridden
+                .mismatchDetectionEnabled(true)  // Static value - should be overridden
+                .configSupplier(() -> config)  // Dynamic config takes precedence
+                .mismatchListener(() -> mock(CopyFromParentMismatchListener.class))
+                .build();
+
+        TestParent parent = TestParent.builder()
+                .transactionId("PARENT-TXN")
+                .amount(500)
+                .build();
+        TestChild child = TestChild.builder()
+                .txnId("ORIGINAL-TXN")
+                .childAmount(100)
+                .build();
+
+        SaveWithParent<TestChild, TestChild, TestParent> opContext =
+                SaveWithParent.<TestChild, TestChild, TestParent>builder()
+                        .entity(child)
+                        .parent(parent)
+                        .saver(e -> e)
+                        .build();
+
+        TransactionExecutionContext ctx = createContext(opContext);
+        TestChild result = observer.execute(ctx, () -> opContext.apply(null));
+
+        // Config supplier (false) should override static value (true)
+        assertEquals("ORIGINAL-TXN", result.getTxnId(), "Config supplier should override static value");
+        assertEquals(100, result.getChildAmount(), "Config supplier should override static value");
+    }
+
+    @Test
+    void testConfigSupplier_nullValues_fallbackToStatic() {
+        // Config supplier returns null for some values
+        // Should fall back to static values
+        TestConfig config = TestConfig.builder()
+                .copyEnabled(null)  // Null - should fall back to static
+                .mismatchDetectionEnabled(null)  // Null - should fall back to static
+                .copyIfDefaultOnly(null)  // Null - should fall back to static
+                .build();
+
+        CopyFromParentObserver observer = CopyFromParentObserver.builder()
+                .copyEnabled(true)  // Static fallback
+                .mismatchDetectionEnabled(false)  // Static fallback
+                .configSupplier(() -> config)
+                .build();
+
+        TestParent parent = TestParent.builder()
+                .transactionId("TXN-123")
+                .amount(500)
+                .build();
+        TestChild child = TestChild.builder().build();
+
+        SaveWithParent<TestChild, TestChild, TestParent> opContext =
+                SaveWithParent.<TestChild, TestChild, TestParent>builder()
+                        .entity(child)
+                        .parent(parent)
+                        .saver(e -> e)
+                        .build();
+
+        TransactionExecutionContext ctx = createContext(opContext);
+        TestChild result = observer.execute(ctx, () -> opContext.apply(null));
+
+        // Should use static value (true) since config returns null
+        assertEquals("TXN-123", result.getTxnId(), "Should fall back to static value when config returns null");
+        assertEquals(500, result.getChildAmount(), "Should fall back to static value when config returns null");
+    }
+
+    @Test
+    void testConfigSupplier_nullValues_fallbackToDefaults() {
+        // Config supplier returns null, no static values
+        // Should fall back to defaults (copyEnabled=true, others=false)
+        TestConfig config = TestConfig.builder()
+                .copyEnabled(null)
+                .mismatchDetectionEnabled(null)
+                .copyIfDefaultOnly(null)
+                .build();
+
+        CopyFromParentObserver observer = CopyFromParentObserver.builder()
+                .configSupplier(() -> config)
+                .build();
+
+        TestParent parent = TestParent.builder()
+                .transactionId("TXN-123")
+                .amount(500)
+                .build();
+        TestChild child = TestChild.builder().build();
+
+        SaveWithParent<TestChild, TestChild, TestParent> opContext =
+                SaveWithParent.<TestChild, TestChild, TestParent>builder()
+                        .entity(child)
+                        .parent(parent)
+                        .saver(e -> e)
+                        .build();
+
+        TransactionExecutionContext ctx = createContext(opContext);
+        TestChild result = observer.execute(ctx, () -> opContext.apply(null));
+
+        // Should use default value (true) for copyEnabled
+        assertEquals("TXN-123", result.getTxnId(), "Should fall back to default value (true) when config and static are null");
+        assertEquals(500, result.getChildAmount(), "Should fall back to default value (true) when config and static are null");
+    }
+
+    @Test
+    void testConfigSupplier_exception_fallbackToStatic() {
+        AtomicInteger callCount = new AtomicInteger(0);
+
+        CopyFromParentObserver observer = CopyFromParentObserver.builder()
+                .copyEnabled(true)  // Static fallback
+                .configSupplier(() -> {
+                    callCount.incrementAndGet();
+                    throw new RuntimeException("Config service unavailable");
+                })
+                .build();
+
+        TestParent parent = TestParent.builder()
+                .transactionId("TXN-123")
+                .amount(500)
+                .build();
+        TestChild child = TestChild.builder().build();
+
+        SaveWithParent<TestChild, TestChild, TestParent> opContext =
+                SaveWithParent.<TestChild, TestChild, TestParent>builder()
+                        .entity(child)
+                        .parent(parent)
+                        .saver(e -> e)
+                        .build();
+
+        TransactionExecutionContext ctx = createContext(opContext);
+        TestChild result = observer.execute(ctx, () -> opContext.apply(null));
+
+        // Should fall back to static value when config supplier throws
+        assertEquals("TXN-123", result.getTxnId(), "Should fall back to static value when config supplier throws");
+        assertEquals(500, result.getChildAmount(), "Should fall back to static value when config supplier throws");
+        
+        // Config supplier is called 3 times during getPersistor() initialization:
+        // once for copyEnabled, once for mismatchDetectionEnabled, once for copyIfDefaultOnly
+        assertEquals(3, callCount.get(), "Config supplier should be called 3 times (once per config value)");
+    }
+
+    @Test
+    void testConfigSupplier_partialNullValues_mixedFallback() {
+        // Config returns value for copyEnabled, null for others
+        TestConfig config = TestConfig.builder()
+                .copyEnabled(false)  // Explicit value
+                .mismatchDetectionEnabled(null)  // Null - should use static or default
+                .copyIfDefaultOnly(null)  // Null - should use static or default
+                .build();
+
+        CopyFromParentObserver observer = CopyFromParentObserver.builder()
+                .copyEnabled(true)  // Static - should be overridden by config
+                .mismatchDetectionEnabled(true)  // Static - should be used (config is null)
+                .configSupplier(() -> config)
+                .mismatchListener(() -> mock(CopyFromParentMismatchListener.class))
+                .build();
+
+        TestParent parent = TestParent.builder()
+                .transactionId("PARENT-TXN")
+                .amount(500)
+                .build();
+        TestChild child = TestChild.builder()
+                .txnId("ORIGINAL-TXN")
+                .childAmount(100)
+                .build();
+
+        SaveWithParent<TestChild, TestChild, TestParent> opContext =
+                SaveWithParent.<TestChild, TestChild, TestParent>builder()
+                        .entity(child)
+                        .parent(parent)
+                        .saver(e -> e)
+                        .build();
+
+        TransactionExecutionContext ctx = createContext(opContext);
+        TestChild result = observer.execute(ctx, () -> opContext.apply(null));
+
+        // copyEnabled: config (false) overrides static (true)
+        // mismatchDetectionEnabled: static (true) used since config is null
+        // Result: no copy (copyEnabled=false), but if it were true, mismatch would be detected
+        assertEquals("ORIGINAL-TXN", result.getTxnId(), "Config supplier (false) should override static");
+        assertEquals(100, result.getChildAmount(), "Config supplier (false) should override static");
+    }
+
+    @Test
+    void testConfigSupplier_lazyInit_calledOnce() {
+        AtomicInteger supplierCallCount = new AtomicInteger(0);
+
+        TestConfig config = TestConfig.builder()
+                .copyEnabled(true)
+                .mismatchDetectionEnabled(false)
+                .copyIfDefaultOnly(false)
+                .build();
+
+        CopyFromParentObserver observer = CopyFromParentObserver.builder()
+                .configSupplier(() -> {
+                    supplierCallCount.incrementAndGet();
+                    return config;
+                })
+                .build();
+
+        TestParent parent = TestParent.builder().transactionId("TXN").amount(100).build();
+        TestChild child = TestChild.builder().build();
+
+        SaveWithParent<TestChild, TestChild, TestParent> opContext =
+                SaveWithParent.<TestChild, TestChild, TestParent>builder()
+                        .entity(child)
+                        .parent(parent)
+                        .saver(e -> e)
+                        .build();
+
+        TransactionExecutionContext ctx = createContext(opContext);
+
+        // Execute multiple times
+        observer.execute(ctx, () -> opContext.apply(null));
+        observer.execute(ctx, () -> opContext.apply(null));
+        observer.execute(ctx, () -> opContext.apply(null));
+
+        // Config supplier is called 3 times on first execution (once for each config value),
+        // but not called again on subsequent executions (persistor is cached)
+        assertEquals(3, supplierCallCount.get(), "Config supplier should be called 3 times on first execution only");
+    }
+
+    @Test
+    void testConfigSupplier_nullConfig_fallbackToDefaults() {
+        CopyFromParentObserver observer = CopyFromParentObserver.builder()
+                .configSupplier(() -> null)  // Supplier returns null
+                .build();
+
+        TestParent parent = TestParent.builder()
+                .transactionId("TXN-123")
+                .amount(500)
+                .build();
+        TestChild child = TestChild.builder().build();
+
+        SaveWithParent<TestChild, TestChild, TestParent> opContext =
+                SaveWithParent.<TestChild, TestChild, TestParent>builder()
+                        .entity(child)
+                        .parent(parent)
+                        .saver(e -> e)
+                        .build();
+
+        TransactionExecutionContext ctx = createContext(opContext);
+        TestChild result = observer.execute(ctx, () -> opContext.apply(null));
+
+        // Should use default values (copyEnabled=true)
+        assertEquals("TXN-123", result.getTxnId(), "Should fall back to default when supplier returns null");
+        assertEquals(500, result.getChildAmount(), "Should fall back to default when supplier returns null");
+    }
+
+    @Test
+    void testConfigSupplier_mismatchDetectionWithoutListener_throws() {
+        // Config enables mismatch detection but no listener provided
+        // Should log warning but continue with copy
+        TestConfig config = TestConfig.builder()
+                .copyEnabled(true)
+                .mismatchDetectionEnabled(true)  // Enabled but no listener
+                .copyIfDefaultOnly(false)
+                .build();
+
+        CopyFromParentObserver observer = CopyFromParentObserver.builder()
+                .configSupplier(() -> config)
+                // No mismatchListener provided
+                .build();
+
+        TestParent parent = TestParent.builder()
+                .transactionId("PARENT-TXN")
+                .amount(500)
+                .build();
+        MismatchChild child = MismatchChild.builder()
+                .txnId("CHILD-TXN")  // Would be a mismatch
+                .childAmount(100)
+                .build();
+
+        SaveWithParent<MismatchChild, MismatchChild, TestParent> opContext =
+                SaveWithParent.<MismatchChild, MismatchChild, TestParent>builder()
+                        .entity(child)
+                        .parent(parent)
+                        .saver(e -> e)
+                        .build();
+
+        TransactionExecutionContext ctx = createContext(opContext);
+
+        assertThrows(IllegalArgumentException.class, () -> observer.execute(ctx, () -> opContext.apply(null)),
+                "Should throw when mismatchDetectionEnabled=true but listener is null");
+    }
+
+    @Test
+    void testConfigSupplier_copyIfDefaultOnly() {
+        TestConfig config = TestConfig.builder()
+                .copyEnabled(true)
+                .mismatchDetectionEnabled(false)
+                .copyIfDefaultOnly(true)  // Enable strict mode
+                .build();
+
+        CopyFromParentObserver observer = CopyFromParentObserver.builder()
+                .configSupplier(() -> config)
+                .build();
+
+        TestParent parent = TestParent.builder()
+                .transactionId("PARENT-TXN")
+                .amount(500)
+                .build();
+        
+        // Child with default values - should be copied
+        TestChild childWithDefaults = TestChild.builder().build();
+        
+        SaveWithParent<TestChild, TestChild, TestParent> opContextDefaults =
+                SaveWithParent.<TestChild, TestChild, TestParent>builder()
+                        .entity(childWithDefaults)
+                        .parent(parent)
+                        .saver(e -> e)
+                        .build();
+
+        TransactionExecutionContext ctx1 = createContext(opContextDefaults);
+        TestChild result1 = observer.execute(ctx1, () -> opContextDefaults.apply(null));
+
+        // Should copy because child has default values
+        assertEquals("PARENT-TXN", result1.getTxnId());
+        assertEquals(500, result1.getChildAmount());
+    }
+
+    @Test
+    void testBackwardCompatibility_staticValuesStillWork() {
+        // Code without config supplier should also to work
+        CopyFromParentObserver observer = CopyFromParentObserver.builder()
+                .copyEnabled(true)
+                .mismatchDetectionEnabled(false)
+                .build();
+
+        TestParent parent = TestParent.builder()
+                .transactionId("TXN-123")
+                .amount(500)
+                .build();
+        TestChild child = TestChild.builder().build();
+
+        SaveWithParent<TestChild, TestChild, TestParent> opContext =
+                SaveWithParent.<TestChild, TestChild, TestParent>builder()
+                        .entity(child)
+                        .parent(parent)
+                        .saver(e -> e)
+                        .build();
+
+        TransactionExecutionContext ctx = createContext(opContext);
+        TestChild result = observer.execute(ctx, () -> opContext.apply(null));
+
+        assertEquals("TXN-123", result.getTxnId(), "Static values should still work");
+        assertEquals(500, result.getChildAmount(), "Static values should still work");
+    }
 }
