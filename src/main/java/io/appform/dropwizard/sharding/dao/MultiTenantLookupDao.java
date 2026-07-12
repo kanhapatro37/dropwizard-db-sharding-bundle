@@ -472,7 +472,6 @@ public class MultiTenantLookupDao<T> implements ShardedDao<T> {
                 key -> dao.getLocked(key, criteriaUpdater, LockMode.NONE),
                 null,
                 id,
-                false,
                 shardInfoProviders.get(tenantId), entityClass, observer);
     }
 
@@ -509,7 +508,6 @@ public class MultiTenantLookupDao<T> implements ShardedDao<T> {
                 key -> dao.getLocked(key, criteriaUpdater, LockMode.NONE),
                 entityPopulator,
                 id,
-                false,
                 shardInfoProviders.get(tenantId), entityClass, observer);
     }
 
@@ -1034,7 +1032,6 @@ public class MultiTenantLookupDao<T> implements ShardedDao<T> {
         private final int shardId;
         private final SessionFactory sessionFactory;
         private final Supplier<Boolean> entityPopulator;
-        private final boolean skipTransaction;
         private final TransactionExecutionContext executionContext;
         private final TransactionObserver observer;
 
@@ -1045,7 +1042,6 @@ public class MultiTenantLookupDao<T> implements ShardedDao<T> {
                 Function<String, T> getter,
                 Supplier<Boolean> entityPopulator,
                 String key,
-                boolean skipTxn,
                 final ShardInfoProvider shardInfoProvider,
                 final Class<?> entityClass,
                 TransactionObserver observer) {
@@ -1053,7 +1049,6 @@ public class MultiTenantLookupDao<T> implements ShardedDao<T> {
             this.shardId = shardId;
             this.sessionFactory = sessionFactory;
             this.entityPopulator = entityPopulator;
-            this.skipTransaction = skipTxn;
             this.observer = observer;
             val shardName = shardInfoProvider.shardName(shardId);
             val opContext = ReadOnlyForLookupDao.<T>builder()
@@ -1464,8 +1459,7 @@ public class MultiTenantLookupDao<T> implements ShardedDao<T> {
         private T executeImpl() {
             return observer.execute(executionContext, () -> {
                 TransactionHandler transactionHandler = new TransactionHandler(sessionFactory,
-                        true,
-                        this.skipTransaction);
+                        true);
                 transactionHandler.beforeStart();
                 try {
                     val opContext = ((ReadOnlyForLookupDao<T>) executionContext.getOpContext());
