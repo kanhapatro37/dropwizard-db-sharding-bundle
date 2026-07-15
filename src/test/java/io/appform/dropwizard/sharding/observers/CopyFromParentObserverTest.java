@@ -399,11 +399,10 @@ class CopyFromParentObserverTest {
     // Test: Builder validation
     @Test
     void testBuilder_mismatchDetectionEnabledWithoutListener_throwsException() {
-        assertThrows(IllegalArgumentException.class, () ->
-                CopyFromParentObserver.builder()
-                        .copyEnabled(true)
-                        .mismatchDetectionEnabled(true)
-                        .build(),
+        var builder = CopyFromParentObserver.builder()
+                .copyEnabled(true)
+                .mismatchDetectionEnabled(true);
+        assertThrows(IllegalArgumentException.class, builder::build,
                 "Should throw when mismatchDetectionEnabled=true but listener is null");
     }
 
@@ -816,9 +815,8 @@ class CopyFromParentObserverTest {
         assertEquals("TXN-123", result.getTxnId(), "Should fall back to static value when config supplier throws");
         assertEquals(500, result.getChildAmount(), "Should fall back to static value when config supplier throws");
         
-        // Config supplier is called 3 times during getPersistor() initialization:
-        // once for copyEnabled, once for mismatchDetectionEnabled, once for copyIfDefaultOnly
-        assertEquals(3, callCount.get(), "Config supplier should be called 3 times (once per config value)");
+        // Config supplier is called once during getPersistor() initialization
+        assertEquals(1, callCount.get(), "Config supplier should be called once during initialization");
     }
 
     @Test
@@ -897,9 +895,9 @@ class CopyFromParentObserverTest {
         observer.execute(ctx, () -> opContext.apply(null));
         observer.execute(ctx, () -> opContext.apply(null));
 
-        // Config supplier is called 3 times on first execution (once for each config value),
+        // Config supplier is called once on first execution,
         // but not called again on subsequent executions (persistor is cached)
-        assertEquals(3, supplierCallCount.get(), "Config supplier should be called 3 times on first execution only");
+        assertEquals(1, supplierCallCount.get(), "Config supplier should be called once on first execution only");
     }
 
     @Test

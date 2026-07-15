@@ -13,7 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-public class CopyFromParentUtilsTest {
+class CopyFromParentUtilsTest {
 
     // Test entities
 
@@ -63,7 +63,7 @@ public class CopyFromParentUtilsTest {
     static class ParentBase {
         private String baseField;
         public String getBaseField() { return baseField; }
-        public void setBaseField(String v) { this.baseField = v; }
+        void setBaseField(String v) { this.baseField = v; }
     }
 
     @Data
@@ -144,7 +144,7 @@ public class CopyFromParentUtilsTest {
     // Tests
 
     @Test
-    public void testCopyFields_copiesAnnotatedFields() {
+    void testCopyFields_copiesAnnotatedFields() {
         TestParent parent = TestParent.builder()
                 .transactionId("TXN-123")
                 .amount(500)
@@ -162,7 +162,7 @@ public class CopyFromParentUtilsTest {
     }
 
     @Test
-    public void testCopyFields_noopForPlainEntity() {
+    void testCopyFields_noopForPlainEntity() {
         TestParent parent = TestParent.builder().transactionId("T1").build();
         PlainEntity plain = PlainEntity.builder().name("original").build();
 
@@ -171,7 +171,7 @@ public class CopyFromParentUtilsTest {
     }
 
     @Test
-    public void testCopyFields_noopForEmptyAnnotatedChild() {
+    void testCopyFields_noopForEmptyAnnotatedChild() {
         TestParent parent = TestParent.builder().transactionId("T1").build();
         EmptyAnnotatedChild child = EmptyAnnotatedChild.builder().someField("value").build();
 
@@ -180,19 +180,19 @@ public class CopyFromParentUtilsTest {
     }
 
     @Test
-    public void testCopyFields_nullParentIsNoop() {
+    void testCopyFields_nullParentIsNoop() {
         TestChild child = TestChild.builder().ownField("mine").build();
         assertDoesNotThrow(() -> CopyFromParentUtils.copyFields(null, child, false));
     }
 
     @Test
-    public void testCopyFields_nullChildIsNoop() {
+    void testCopyFields_nullChildIsNoop() {
         TestParent parent = TestParent.builder().transactionId("T1").build();
         assertDoesNotThrow(() -> CopyFromParentUtils.copyFields(parent, null, false));
     }
 
     @Test
-    public void testCopyFields_parentTypeMismatchThrows() {
+    void testCopyFields_parentTypeMismatchThrows() {
         PlainEntity wrongParent = PlainEntity.builder().name("wrong").build();
         TestChild child = TestChild.builder().build();
 
@@ -201,7 +201,7 @@ public class CopyFromParentUtilsTest {
     }
 
     @Test
-    public void testCopyFields_inheritedParentField() {
+    void testCopyFields_inheritedParentField() {
         InheritedParent parent = new InheritedParent("own");
         parent.setBaseField("from-base");
         ChildOfInherited child = new ChildOfInherited();
@@ -212,7 +212,7 @@ public class CopyFromParentUtilsTest {
     }
 
     @Test
-    public void testCopyFields_overwritesExistingValue() {
+    void testCopyFields_overwritesExistingValue() {
         TestParent parent = TestParent.builder()
                 .transactionId("NEW-TXN")
                 .amount(999)
@@ -229,7 +229,7 @@ public class CopyFromParentUtilsTest {
     }
 
     @Test
-    public void testCopyFields_idempotent() {
+    void testCopyFields_idempotent() {
         TestParent parent = TestParent.builder()
                 .transactionId("TXN")
                 .amount(100)
@@ -244,7 +244,7 @@ public class CopyFromParentUtilsTest {
     }
 
     @Test
-    public void testCopyFields_copiesNullValues() {
+    void testCopyFields_copiesNullValues() {
         TestParent parent = TestParent.builder()
                 .transactionId(null)
                 .amount(0)
@@ -261,7 +261,7 @@ public class CopyFromParentUtilsTest {
     }
 
     @Test
-    public void testNoOverride_skipsWhenChildFieldAlreadySet() {
+    void testNoOverride_skipsWhenChildFieldAlreadySet() {
         TestParent parent = TestParent.builder()
                 .transactionId("PARENT-TXN")
                 .amount(500)
@@ -281,7 +281,7 @@ public class CopyFromParentUtilsTest {
     }
 
     @Test
-    public void testNoOverride_doesNotCopyEvenWhenChildFieldIsDefault() {
+    void testNoOverride_doesNotCopyEvenWhenChildFieldIsDefault() {
         TestParent parent = TestParent.builder()
                 .transactionId("PARENT-TXN")
                 .amount(500)
@@ -297,7 +297,7 @@ public class CopyFromParentUtilsTest {
     }
 
     @Test
-    public void testNoOverride_partiallySet() {
+    void testNoOverride_partiallySet() {
         TestParent parent = TestParent.builder()
                 .transactionId("PARENT-TXN")
                 .amount(500)
@@ -315,7 +315,7 @@ public class CopyFromParentUtilsTest {
     }
 
     @Test
-    public void testMixedOverride_respectsPerFieldSetting() {
+    void testMixedOverride_respectsPerFieldSetting() {
         TestParent parent = TestParent.builder()
                 .transactionId("PARENT-TXN")
                 .amount(500)
@@ -332,7 +332,7 @@ public class CopyFromParentUtilsTest {
     }
 
     @Test
-    public void testNoOverride_allPrimitiveTypes_defaultFieldsAreNotOverridden() {
+    void testNoOverride_allPrimitiveTypes_defaultFieldsAreNotOverridden() {
         PrimitiveParent parent = PrimitiveParent.builder()
                 .intVal(42)
                 .boolVal(true)
@@ -350,7 +350,7 @@ public class CopyFromParentUtilsTest {
     }
 
     @Test
-    public void testOverrideTrue_isDefaultBehavior() {
+    void testOverrideTrue_isDefaultBehavior() {
         // TestChild uses override=true (default), so existing values should be overwritten
         TestParent parent = TestParent.builder()
                 .transactionId("NEW")
@@ -392,7 +392,7 @@ public class CopyFromParentUtilsTest {
     }
 
     @Test
-    public void testCopyFields_inheritsParentEntityFromSuperclass() {
+    void testCopyFields_inheritsParentEntityFromSuperclass() {
         TestParent parent = TestParent.builder().transactionId("INHERITED-TXN").build();
         InheritedChild child = InheritedChild.builder().ownField("mine").build();
 
@@ -403,7 +403,7 @@ public class CopyFromParentUtilsTest {
     }
 
     @Test
-    public void testCopyFields_inheritedChild_overwritesExistingValue() {
+    void testCopyFields_inheritedChild_overwritesExistingValue() {
         TestParent parent = TestParent.builder().transactionId("NEW").build();
         InheritedChild child = InheritedChild.builder().txnId("OLD").ownField("mine").build();
 
@@ -461,7 +461,7 @@ public class CopyFromParentUtilsTest {
     }
 
     @Test
-    public void testCopyFields_privateFieldInParentSuperclass() {
+    void testCopyFields_privateFieldInParentSuperclass() {
         ConcreteParent parent = ConcreteParent.builder()
                 .partitionId(42L).baseField("base").concreteField("concrete").build();
         ConcreteChild child = ConcreteChild.builder().childOwnField("mine").build();
@@ -474,7 +474,7 @@ public class CopyFromParentUtilsTest {
     }
 
     @Test
-    public void testCopyFields_privateFieldInChildSuperclass() {
+    void testCopyFields_privateFieldInChildSuperclass() {
         ConcreteParent parent = ConcreteParent.builder()
                 .partitionId(99L).baseField("fromParent").build();
         ConcreteChild child = ConcreteChild.builder()
@@ -487,7 +487,7 @@ public class CopyFromParentUtilsTest {
     }
 
     @Test
-    public void testCopyFields_bothFieldsInSuperclasses() {
+    void testCopyFields_bothFieldsInSuperclasses() {
         ConcreteParent parent = ConcreteParent.builder().partitionId(777L).build();
         ConcreteChild child = ConcreteChild.builder().build();
 

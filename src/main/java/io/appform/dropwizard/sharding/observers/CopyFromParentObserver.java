@@ -90,67 +90,86 @@ public class CopyFromParentObserver extends TransactionObserver {
         if (persistor == null) {
             synchronized (this) {
                 if (persistor == null) {
-                    // Get resolved configuration values - either from dynamic supplier or static values
-                    boolean copyEnabled = resolveConfigValue(
-                            configSupplier != null ? () -> configSupplier.get().getCopyEnabled() : null,
-                            staticCopyEnabled,
-                            true);  // default
-                    
-                    boolean mismatchDetectionEnabled = resolveConfigValue(
-                            configSupplier != null ? () -> configSupplier.get().getMismatchDetectionEnabled() : null,
-                            staticMismatchDetectionEnabled,
-                            false);  // default
-                    
-                    boolean copyIfDefaultOnly = resolveConfigValue(
-                            configSupplier != null ? () -> configSupplier.get().getCopyIfDefaultOnly() : null,
-                            staticCopyIfDefaultOnly,
-                            false);  // default
-                    
-                    CopyFromParentMismatchListener listener = null;
-                    if (mismatchDetectionEnabled && mismatchListenerSupplier != null) {
-                        try {
-                            listener = mismatchListenerSupplier.get();
-                        } catch (Exception e) {
-                            log.error("Failed to resolve CopyFromParentMismatchListener, "
-                                    + "mismatch detection will be disabled", e);
-                        }
-                    } else if (mismatchDetectionEnabled) {
-                        throw new IllegalArgumentException(
-                                "mismatchListener must be provided when mismatchDetectionEnabled is true");
-                    }
-                    persistor = new CopyFromParentPersistor(copyEnabled, mismatchDetectionEnabled,
-                            copyIfDefaultOnly, listener);
-                    
-                    log.info("Initialized CopyFromParentPersistor with copyEnabled={}, mismatchDetectionEnabled={}, copyIfDefaultOnly={}",
-                            copyEnabled, mismatchDetectionEnabled, copyIfDefaultOnly);
+                    persistor = initializePersistor();
                 }
             }
         }
         return persistor;
     }
-    
+
+    private CopyFromParentPersistor initializePersistor() {
+        CopyFromParentObserverConfig dynamicConfig = fetchDynamicConfig();
+
+        boolean copyEnabled = resolveConfigValue(
+                dynamicConfig != null ? dynamicConfig.getCopyEnabled() : null,
+                staticCopyEnabled,
+                true);
+
+        boolean mismatchDetectionEnabled = resolveConfigValue(
+                dynamicConfig != null ? dynamicConfig.getMismatchDetectionEnabled() : null,
+                staticMismatchDetectionEnabled,
+                false);
+
+        boolean copyIfDefaultOnly = resolveConfigValue(
+                dynamicConfig != null ? dynamicConfig.getCopyIfDefaultOnly() : null,
+                staticCopyIfDefaultOnly,
+                false);
+
+        CopyFromParentMismatchListener listener = resolveMismatchListener(mismatchDetectionEnabled);
+
+        CopyFromParentPersistor result = new CopyFromParentPersistor(copyEnabled, mismatchDetectionEnabled,
+                copyIfDefaultOnly, listener);
+
+        log.info("Initialized CopyFromParentPersistor with copyEnabled={}, mismatchDetectionEnabled={}, copyIfDefaultOnly={}",
+                copyEnabled, mismatchDetectionEnabled, copyIfDefaultOnly);
+
+        return result;
+    }
+
+    private CopyFromParentObserverConfig fetchDynamicConfig() {
+        if (configSupplier == null) {
+            return null;
+        }
+        try {
+            return configSupplier.get();
+        } catch (Exception e) {
+            log.warn("Failed to fetch dynamic config, falling back to static/default", e);
+            return null;
+        }
+    }
+
+    private CopyFromParentMismatchListener resolveMismatchListener(boolean mismatchDetectionEnabled) {
+        if (!mismatchDetectionEnabled) {
+            return null;
+        }
+        if (mismatchListenerSupplier == null) {
+            throw new IllegalArgumentException(
+                    "mismatchListener must be provided when mismatchDetectionEnabled is true");
+        }
+        try {
+            return mismatchListenerSupplier.get();
+        } catch (Exception e) {
+            log.error("Failed to resolve CopyFromParentMismatchListener, "
+                    + "mismatch detection will be disabled", e);
+            return null;
+        }
+    }
+
     /**
      * Resolves a configuration value in order of precedence:
-     * 1. Dynamic supplier (if available and returns non-null)
+     * 1. Dynamic value (if non-null)
      * 2. Static value (if non-null)
      * 3. Default value
      */
-    private boolean resolveConfigValue(Supplier<Boolean> dynamicSupplier, Boolean staticValue, boolean defaultValue) {
-        try {
-            if (dynamicSupplier != null) {
-                Boolean dynamicValue = dynamicSupplier.get();
-                if (dynamicValue != null) {
-                    return dynamicValue;
-                }
-            }
-        } catch (Exception e) {
-            log.warn("Failed to fetch dynamic config value, falling back to static/default", e);
+    private boolean resolveConfigValue(Boolean dynamicValue, Boolean staticValue, boolean defaultValue) {
+        if (dynamicValue != null) {
+            return dynamicValue;
         }
-        
+
         if (staticValue != null) {
             return staticValue;
         }
-        
+
         return defaultValue;
     }
 

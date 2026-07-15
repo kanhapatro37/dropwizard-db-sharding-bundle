@@ -5,17 +5,20 @@ import org.hibernate.Session;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mock;
-import org.mockito.Mockito;
 
 import java.util.function.Function;
 
-public class SaveWithParentTest {
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+
+class SaveWithParentTest {
 
     @Mock
     Session session;
 
     @Test
-    public void testApply_saverInvokedAndAfterSaveApplied() {
+    void testApply_saverInvokedAndAfterSaveApplied() {
         Function<String, String> spiedSaver = LambdaTestUtils.spiedFunction(e -> e + "_saved");
 
         val op = SaveWithParent.<String, Integer, Integer>builder()
@@ -29,11 +32,11 @@ public class SaveWithParentTest {
         Assertions.assertEquals(42, op.getParent());
         Assertions.assertEquals("hello", op.getEntity());
         Assertions.assertEquals(OpType.SAVE_WITH_PARENT, op.getOpType());
-        Mockito.verify(spiedSaver, Mockito.times(1)).apply(Mockito.any());
+        verify(spiedSaver, times(1)).apply(any());
     }
 
     @Test
-    public void testSaverCanBeReplaced() {
+    void testSaverCanBeReplaced() {
         // Simulates what CopyFromParentPersistor does: wrap the saver
         Function<String, String> originalSaver = LambdaTestUtils.spiedFunction(e -> e + "_original");
 
@@ -47,15 +50,23 @@ public class SaveWithParentTest {
         op.setSaver(e -> originalSaver.apply("from_parent_" + e));
 
         Assertions.assertEquals("from_parent_child_original", op.apply(session));
-        Mockito.verify(originalSaver, Mockito.times(1)).apply(Mockito.any());
+        verify(originalSaver, times(1)).apply(any());
     }
 
     @Test
-    public void testNullConstraints() {
+    void testNullEntity_throwsNPE() {
         Assertions.assertThrows(NullPointerException.class, () ->
-                SaveWithParent.builder().entity(null).parent("p").saver(e -> e).build());
+                SaveWithParent.builder().entity(null).build());
+    }
+
+    @Test
+    void testNullParent_throwsNPE() {
         Assertions.assertThrows(NullPointerException.class, () ->
-                SaveWithParent.builder().entity("e").parent(null).saver(e -> e).build());
+                SaveWithParent.builder().entity("e").parent(null).build());
+    }
+
+    @Test
+    void testNullSaver_throwsNPE() {
         Assertions.assertThrows(NullPointerException.class, () ->
                 SaveWithParent.builder().entity("e").parent("p").saver(null).build());
     }

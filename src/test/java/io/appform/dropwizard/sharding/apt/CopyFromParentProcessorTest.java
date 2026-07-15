@@ -9,17 +9,17 @@ import javax.tools.JavaFileObject;
 
 import static com.google.testing.compile.CompilationSubject.assertThat;
 
-public class CopyFromParentProcessorTest {
+class CopyFromParentProcessorTest {
 
     @Test
-    public void testValidAnnotation_compiles() {
+    void testValidAnnotation_compiles() {
         JavaFileObject parent = JavaFileObjects.forSourceString("test.Parent",
                 String.join("\n",
                         "package test;",
                         "public class Parent {",
                         "    private String name;",
                         "    public String getName() { return name; }",
-                        "    public void setName(String name) { this.name = name; }",
+                        "    void setName(String name) { this.name = name; }",
                         "}"));
 
         JavaFileObject child = JavaFileObjects.forSourceString("test.Child",
@@ -41,7 +41,7 @@ public class CopyFromParentProcessorTest {
     }
 
     @Test
-    public void testCopyFromParentWithoutParentEntity_fails() {
+    void testCopyFromParentWithoutParentEntity_fails() {
         JavaFileObject child = JavaFileObjects.forSourceString("test.Child",
                 String.join("\n",
                         "package test;",
@@ -62,7 +62,7 @@ public class CopyFromParentProcessorTest {
     }
 
     @Test
-    public void testFieldNotFoundOnParent_fails() {
+    void testFieldNotFoundOnParent_fails() {
         JavaFileObject parent = JavaFileObjects.forSourceString("test.Parent",
                 String.join("\n",
                         "package test;",
@@ -92,7 +92,7 @@ public class CopyFromParentProcessorTest {
     }
 
     @Test
-    public void testTypeMismatch_fails() {
+    void testTypeMismatch_fails() {
         JavaFileObject parent = JavaFileObjects.forSourceString("test.Parent",
                 String.join("\n",
                         "package test;",
@@ -122,7 +122,7 @@ public class CopyFromParentProcessorTest {
     }
 
     @Test
-    public void testTransientParentField_fails() {
+    void testTransientParentField_fails() {
         JavaFileObject parent = JavaFileObjects.forSourceString("test.Parent",
                 String.join("\n",
                         "package test;",
@@ -154,7 +154,7 @@ public class CopyFromParentProcessorTest {
     }
 
     @Test
-    public void testCompatibleTypes_compiles() {
+    void testCompatibleTypes_compiles() {
         JavaFileObject parent = JavaFileObjects.forSourceString("test.Parent",
                 String.join("\n",
                         "package test;",
@@ -181,7 +181,7 @@ public class CopyFromParentProcessorTest {
     }
 
     @Test
-    public void testMultipleFields_compiles() {
+    void testMultipleFields_compiles() {
         JavaFileObject parent = JavaFileObjects.forSourceString("test.Parent",
                 String.join("\n",
                         "package test;",
@@ -211,7 +211,7 @@ public class CopyFromParentProcessorTest {
     }
 
     @Test
-    public void testInheritedParentField_compiles() {
+    void testInheritedParentField_compiles() {
         JavaFileObject grandParent = JavaFileObjects.forSourceString("test.GrandParent",
                 String.join("\n",
                         "package test;",
@@ -245,7 +245,7 @@ public class CopyFromParentProcessorTest {
     }
 
     @Test
-    public void testNoAnnotations_compiles() {
+    void testNoAnnotations_compiles() {
         JavaFileObject plain = JavaFileObjects.forSourceString("test.Plain",
                 String.join("\n",
                         "package test;",
