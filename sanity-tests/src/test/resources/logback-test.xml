@@ -1,0 +1,25 @@
+<configuration>
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <root level="WARN">
+        <appender-ref ref="STDOUT"/>
+    </root>
+
+    <!-- Show INFO for testcontainers lifecycle (container started, etc.) -->
+    <logger name="org.testcontainers" level="INFO"/>
+    <logger name="tc" level="INFO"/>
+
+    <!-- Suppress Ryuk connection retry warnings (it retries until connected, harmless) -->
+    <logger name="org.testcontainers.utility.RyukResourceReaper" level="ERROR"/>
+
+    <!-- Silence the noisy HTTP wire logs -->
+    <logger name="com.github.dockerjava" level="WARN"/>
+
+    <!-- Silence Hibernate constraint violation stack traces (expected in rollback tests) -->
+    <logger name="org.hibernate.engine.jdbc.spi.SqlExceptionHelper" level="ERROR"/>
+    <logger name="io.appform.dropwizard.sharding.execution.TransactionExecutor" level="OFF"/>
+</configuration>
