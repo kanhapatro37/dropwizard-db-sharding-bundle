@@ -21,7 +21,9 @@ import io.dropwizard.setup.AdminEnvironment;
 import io.dropwizard.setup.Bootstrap;
 import io.dropwizard.setup.Environment;
 import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 import lombok.val;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.MariaDBContainer;
@@ -29,6 +31,7 @@ import org.testcontainers.containers.MariaDBContainer;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -70,6 +73,7 @@ import static org.mockito.Mockito.when;
  * Two bundles = two separate connection pools = guaranteed different physical connections.
  * Writing via writer DAOs and reading via reader DAOs ensures cross-connection verification.
  */
+@Slf4j
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 public abstract class SanityTestBase {
 
@@ -141,6 +145,24 @@ public abstract class SanityTestBase {
     protected RelationalDao<SanityOrderItem> readerOrderItemDao;
 
     // -------------------------------------------------------------------------
+    // Controlled connections for the reader bundle
+    //
+    // Instead of a Tomcat pool, the reader bundle uses pre-created JDBC
+    // connections. Tests can call readerShard0Ds.useConnection(n) to select
+    // which connection index is returned by getConnection().
+    // -------------------------------------------------------------------------
+
+    /** Controlled DataSource for reader shard 0 */
+    protected ControlledConnectionDataSource readerShard0Ds;
+    /** Controlled DataSource for reader shard 1 */
+    protected ControlledConnectionDataSource readerShard1Ds;
+
+    /** Raw JDBC connections backing the reader shard 0 controlled data source */
+    private final List<Connection> readerShard0Connections = new ArrayList<>();
+    /** Raw JDBC connections backing the reader shard 1 controlled data source */
+    private final List<Connection> readerShard1Connections = new ArrayList<>();
+
+    // -------------------------------------------------------------------------
     // Setup — runs once before all tests in the subclass
     // -------------------------------------------------------------------------
 
@@ -152,17 +174,58 @@ public abstract class SanityTestBase {
         String shard0Url = MARIADB.getJdbcUrl();
         String shard1Url = shard0Url.replace("/" + SHARD_0_DB, "/" + SHARD_1_DB);
 
-        // Writer bundle: creates schema, standard pool
+        // Writer bundle: creates schema, standard Tomcat pool (unchanged)
         val writerConfig = buildShardConfig(shard0Url, shard1Url, true);
         writerBundle = initBundle(writerConfig);
         writerOrderLookupDao = writerBundle.createParentObjectDao(SanityOrder.class);
         writerOrderItemDao = writerBundle.createRelatedObjectDao(SanityOrderItem.class);
 
-        // Reader bundle: autoCommit=false, REPEATABLE_READ, separate pool
-        val readerConfig = buildShardConfig(shard0Url, shard1Url, false);
+        // Reader bundle: controlled connections instead of a pool.
+        // Create 2 pre-made connections per shard (conn_0 and conn_1 for each shard).
+        // Tests can switch between them via readerShard0Ds.useConnection(n).
+        int numConnectionsPerShard = getReaderConnectionsPerShard();
+        for (int i = 0; i < numConnectionsPerShard; i++) {
+            readerShard0Connections.add(createReaderConnection(shard0Url));
+            readerShard1Connections.add(createReaderConnection(shard1Url));
+        }
+
+        readerShard0Ds = new ControlledConnectionDataSource(readerShard0Connections);
+        readerShard1Ds = new ControlledConnectionDataSource(readerShard1Connections);
+
+        val readerConfig = buildControlledShardConfig(shard0Url, shard1Url);
         readerBundle = initBundle(readerConfig);
         readerOrderLookupDao = readerBundle.createParentObjectDao(SanityOrder.class);
         readerOrderItemDao = readerBundle.createRelatedObjectDao(SanityOrderItem.class);
+    }
+
+    @AfterAll
+    void closeControlledConnections() {
+        for (Connection conn : readerShard0Connections) {
+            try { conn.close(); } catch (SQLException e) { log.warn("Failed to close shard0 connection", e); }
+        }
+        for (Connection conn : readerShard1Connections) {
+            try { conn.close(); } catch (SQLException e) { log.warn("Failed to close shard1 connection", e); }
+        }
+    }
+
+    /**
+     * Number of pre-created connections per reader shard. Override in subclass
+     * if you need more than 2.
+     */
+    protected int getReaderConnectionsPerShard() {
+        return 2;
+    }
+
+    /**
+     * Selects which connection index the reader bundle will use for BOTH shards.
+     * Call this before a reader DAO operation to control which connection is used.
+     *
+     * @param index 0-based index (default is 0)
+     */
+    protected void useReaderConnection(int index) {
+        readerShard0Ds.useConnection(index);
+        readerShard1Ds.useConnection(index);
+        log.info("Reader bundle now using connection index={}", index);
     }
 
     // -------------------------------------------------------------------------
@@ -186,6 +249,58 @@ public abstract class SanityTestBase {
                         buildDataSource(shard1Url, isWriter)))
                 .shardingOptions(ShardingBundleOptions.builder().build())
                 .build());
+    }
+
+    /**
+     * Builds a ShardConfig for the reader bundle that uses {@link ControlledDataSourceFactory}
+     * instead of real DataSourceFactory. This ensures the bundle's SessionFactoryFactory.build()
+     * receives our ControlledConnectionDataSource instead of a Tomcat pool.
+     */
+    private SanityTestConfig buildControlledShardConfig(String shard0Url, String shard1Url) {
+        return new SanityTestConfig(ShardedHibernateFactory.builder()
+                .shards(List.of(
+                        buildControlledDataSource(shard0Url, readerShard0Ds),
+                        buildControlledDataSource(shard1Url, readerShard1Ds)))
+                .shardingOptions(ShardingBundleOptions.builder().build())
+                .build());
+    }
+
+    /**
+     * Creates a ControlledDataSourceFactory that carries all the Hibernate properties
+     * (dialect, hbm2ddl=none) but returns the given ControlledConnectionDataSource
+     * when build() is called.
+     */
+    private ControlledDataSourceFactory buildControlledDataSource(String jdbcUrl,
+                                                                   ControlledConnectionDataSource controlledDs) {
+        val ds = new ControlledDataSourceFactory(controlledDs);
+        ds.setDriverClass("org.mariadb.jdbc.Driver");
+        ds.setUrl(jdbcUrl);
+        ds.setUser(MARIADB.getUsername());
+        ds.setPassword(MARIADB.getPassword());
+        ds.setValidationQuery("SELECT 1");
+
+        val props = new HashMap<>(Map.of(
+                "hibernate.dialect", "org.hibernate.dialect.MariaDBDialect",
+                "hibernate.hbm2ddl.auto", "none"));
+        ds.setProperties(props);
+
+        ds.setAutoCommitByDefault(false);
+        ds.setDefaultTransactionIsolation(DataSourceFactory.TransactionIsolation.REPEATABLE_READ);
+        return ds;
+    }
+
+    /**
+     * Creates a raw JDBC connection configured like the reader bundle would:
+     * autoCommit=false, REPEATABLE_READ isolation.
+     */
+    private Connection createReaderConnection(String jdbcUrl) throws SQLException {
+        Connection conn = DriverManager.getConnection(
+                jdbcUrl, MARIADB.getUsername(), MARIADB.getPassword());
+        conn.setAutoCommit(false);
+        conn.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+        log.info("Created controlled reader connection: url={}, identityHash={}",
+                jdbcUrl, System.identityHashCode(conn));
+        return conn;
     }
 
     private DBShardingBundleBase<SanityTestConfig> initBundle(SanityTestConfig config) {

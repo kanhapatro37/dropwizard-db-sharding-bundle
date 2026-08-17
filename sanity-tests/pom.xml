@@ -28,7 +28,7 @@
               mvn test -Dsharding.bundle.version=2.1.12-7   (expect failures)
               mvn test -Dsharding.bundle.version=2.1.12-9   (expect pass)
         -->
-        <sharding.bundle.version>2.1.12-7</sharding.bundle.version>
+        <sharding.bundle.version>2.1.12-9</sharding.bundle.version>
 
         <dropwizard.version>2.1.12</dropwizard.version>
         <testcontainers.version>1.21.3</testcontainers.version>
