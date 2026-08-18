@@ -20,6 +20,7 @@ import io.dropwizard.lifecycle.setup.LifecycleEnvironment;
 import io.dropwizard.setup.AdminEnvironment;
 import io.dropwizard.setup.Bootstrap;
 import io.dropwizard.setup.Environment;
+import io.dropwizard.util.Duration;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import lombok.val;
@@ -183,16 +184,20 @@ public abstract class SanityTestBase {
         // Reader bundle: controlled connections instead of a pool.
         // Create 2 pre-made connections per shard (conn_0 and conn_1 for each shard).
         // Tests can switch between them via readerShard0Ds.useConnection(n).
-        int numConnectionsPerShard = getReaderConnectionsPerShard();
-        for (int i = 0; i < numConnectionsPerShard; i++) {
-            readerShard0Connections.add(createReaderConnection(shard0Url));
-            readerShard1Connections.add(createReaderConnection(shard1Url));
-        }
-
-        readerShard0Ds = new ControlledConnectionDataSource(readerShard0Connections);
-        readerShard1Ds = new ControlledConnectionDataSource(readerShard1Connections);
-
-        val readerConfig = buildControlledShardConfig(shard0Url, shard1Url);
+//        int numConnectionsPerShard = getReaderConnectionsPerShard();
+//        for (int i = 0; i < numConnectionsPerShard; i++) {
+//            readerShard0Connections.add(createReaderConnection(shard0Url));
+//            readerShard1Connections.add(createReaderConnection(shard1Url));
+//        }
+//
+//        readerShard0Ds = new ControlledConnectionDataSource(readerShard0Connections);
+//        readerShard1Ds = new ControlledConnectionDataSource(readerShard1Connections);
+//
+//        val readerConfig = buildControlledShardConfig(shard0Url, shard1Url);
+//        readerBundle = initBundle(readerConfig);
+//        readerOrderLookupDao = readerBundle.createParentObjectDao(SanityOrder.class);
+//        readerOrderItemDao = readerBundle.createRelatedObjectDao(SanityOrderItem.class);
+        val readerConfig = buildShardConfig(shard0Url, shard1Url, true);
         readerBundle = initBundle(readerConfig);
         readerOrderLookupDao = readerBundle.createParentObjectDao(SanityOrder.class);
         readerOrderItemDao = readerBundle.createRelatedObjectDao(SanityOrderItem.class);
@@ -219,6 +224,7 @@ public abstract class SanityTestBase {
     /**
      * Selects which connection index the reader bundle will use for BOTH shards.
      * Call this before a reader DAO operation to control which connection is used.
+     * Only meaningful when using {@link FixedConnectionStrategy} (the default).
      *
      * @param index 0-based index (default is 0)
      */
@@ -226,6 +232,25 @@ public abstract class SanityTestBase {
         readerShard0Ds.useConnection(index);
         readerShard1Ds.useConnection(index);
         log.info("Reader bundle now using connection index={}", index);
+    }
+
+    /**
+     * Switches the connection selection strategy on BOTH reader shard DataSources.
+     * <p>Example usage in a test:
+     * <pre>
+     *   // Switch to round-robin: each getConnection() auto-advances
+     *   setReaderStrategy(new RoundRobinConnectionStrategy());
+     *
+     *   // Switch back to fixed: caller controls which connection via useReaderConnection()
+     *   setReaderStrategy(new FixedConnectionStrategy());
+     * </pre>
+     *
+     * @param strategy the new strategy to apply to both reader shard DataSources
+     */
+    protected void setReaderStrategy(ConnectionSelectionStrategy strategy) {
+        readerShard0Ds.setStrategy(strategy);
+        readerShard1Ds.setStrategy(strategy);
+        log.info("Reader bundle strategy changed to {}", strategy.getClass().getSimpleName());
     }
 
     // -------------------------------------------------------------------------
@@ -332,16 +357,18 @@ public abstract class SanityTestBase {
         ds.setMinSize(2);
         ds.setMaxSize(4);
         ds.setInitialSize(2);
+        ds.setUseFairQueue(false);
+        ds.setMaxConnectionAge(Duration.seconds(600));
 
         val props = new HashMap<>(Map.of(
                 "hibernate.dialect", "org.hibernate.dialect.MariaDBDialect",
                 "hibernate.hbm2ddl.auto", isWriter ? "create" : "none"));
         ds.setProperties(props);
 
-        if (!isWriter) {
+//        if (!isWriter) {
             ds.setAutoCommitByDefault(false);
             ds.setDefaultTransactionIsolation(DataSourceFactory.TransactionIsolation.REPEATABLE_READ);
-        }
+//        }
         return ds;
     }
 

@@ -3,7 +3,6 @@ package io.appform.dropwizard.sharding.sanity.base;
 import io.dropwizard.db.ManagedDataSource;
 import lombok.extern.slf4j.Slf4j;
 
-import javax.sql.DataSource;
 import java.io.PrintWriter;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
@@ -12,21 +11,36 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Logger;
 
 /**
  * A {@link ManagedDataSource} that returns pre-created JDBC connections in a controlled
  * order, instead of borrowing from a pool.
  *
+ * <p>Connection selection is governed by a pluggable {@link ConnectionSelectionStrategy}:
+ * <ul>
+ *   <li>{@link FixedConnectionStrategy} (default) — returns the same connection until
+ *       the caller explicitly changes it via {@link #useConnection(int)}.</li>
+ *   <li>{@link RoundRobinConnectionStrategy} — returns the current connection and
+ *       automatically advances to the next one on each {@code getConnection()} call,
+ *       wrapping around when the end is reached.</li>
+ * </ul>
+ *
+ * <p>The strategy can be changed at any time via {@link #setStrategy(ConnectionSelectionStrategy)}.
+ *
  * <p>Usage:
  * <pre>
- *   Connection conn1 = DriverManager.getConnection(url, user, pass);
- *   Connection conn2 = DriverManager.getConnection(url, user, pass);
  *   var ds = new ControlledConnectionDataSource(List.of(conn1, conn2));
  *
- *   ds.useConnection(0);  // subsequent getConnection() calls return conn1
- *   ds.useConnection(1);  // subsequent getConnection() calls return conn2
+ *   // Fixed (default): explicit control
+ *   ds.useConnection(0);  // all getConnection() calls return conn1
+ *   ds.useConnection(1);  // all getConnection() calls return conn2
+ *
+ *   // Round-robin: auto-advancing
+ *   ds.setStrategy(new RoundRobinConnectionStrategy());
+ *   ds.getConnection();   // → conn1 (advances to 1)
+ *   ds.getConnection();   // → conn2 (advances to 0)
+ *   ds.getConnection();   // → conn1 (advances to 1)
  * </pre>
  *
  * <p>Connections returned by {@link #getConnection()} are wrapped in a proxy that
@@ -39,18 +53,40 @@ import java.util.logging.Logger;
 public class ControlledConnectionDataSource implements ManagedDataSource {
 
     private final List<Connection> connections;
-    private final AtomicInteger selector = new AtomicInteger(0);
+    private volatile ConnectionSelectionStrategy strategy;
 
     public ControlledConnectionDataSource(List<Connection> connections) {
+        this(connections, new FixedConnectionStrategy());
+    }
+
+    public ControlledConnectionDataSource(List<Connection> connections,
+                                          ConnectionSelectionStrategy strategy) {
         if (connections == null || connections.isEmpty()) {
             throw new IllegalArgumentException("Must provide at least one connection");
         }
         this.connections = connections;
+        this.strategy = strategy;
+    }
+
+    /**
+     * Replaces the connection selection strategy.
+     * The new strategy starts from index 0 unless you call {@link #useConnection(int)} after.
+     */
+    public void setStrategy(ConnectionSelectionStrategy strategy) {
+        this.strategy = strategy;
+    }
+
+    /**
+     * Returns the current strategy.
+     */
+    public ConnectionSelectionStrategy getStrategy() {
+        return strategy;
     }
 
     /**
      * Select which pre-created connection index to return on the next
-     * {@link #getConnection()} call.
+     * {@link #getConnection()} call. Delegates to the current strategy's
+     * {@link ConnectionSelectionStrategy#reset(int)}.
      *
      * @param index 0-based index into the connections list
      */
@@ -59,21 +95,21 @@ public class ControlledConnectionDataSource implements ManagedDataSource {
             throw new IndexOutOfBoundsException(
                     "Index " + index + " out of range [0, " + connections.size() + ")");
         }
-        selector.set(index);
+        strategy.reset(index);
     }
 
     /**
-     * Returns the currently selected connection index.
+     * Returns the index that was last returned (or will be returned for fixed strategy).
      */
     public int currentIndex() {
-        return selector.get();
+        return strategy.currentIndex();
     }
 
     @Override
     public Connection getConnection() throws SQLException {
-        int idx = selector.get();
+        int idx = strategy.nextIndex(connections.size());
         Connection real = connections.get(idx);
-        log.debug("ControlledConnectionDataSource: returning connection index={}, conn={}",
+        log.info("ControlledConnectionDataSource: returning connection index={}, conn={}",
                 idx, System.identityHashCode(real));
         return wrapWithNoOpClose(real);
     }

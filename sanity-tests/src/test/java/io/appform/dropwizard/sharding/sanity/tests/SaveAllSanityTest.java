@@ -1,6 +1,8 @@
 package io.appform.dropwizard.sharding.sanity.tests;
 
+import io.appform.dropwizard.sharding.sanity.base.RoundRobinConnectionStrategy;
 import io.appform.dropwizard.sharding.sanity.base.SanityTestBase;
+import io.appform.dropwizard.sharding.sanity.entities.SanityOrder;
 import io.appform.dropwizard.sharding.sanity.entities.SanityOrderItem;
 import lombok.val;
 import org.hibernate.criterion.DetachedCriteria;
@@ -126,6 +128,49 @@ class SaveAllSanityTest extends SanityTestBase {
         assertEquals("item-3", afterItems.get(0).getItemName());
         assertEquals(99, afterItems.get(0).getQuantity(),
                 "Pre-inserted item-3 should retain its original data, not the batch version");
+    }
+
+    // -------------------------------------------------------------------------
+    // TC-3: Round-robin strategy — read, write, read-back via LookupDao
+    //
+    // Demonstrates using a non-default strategy. The reader bundle's
+    // ControlledConnectionDataSource defaults to FixedConnectionStrategy
+    // (same connection on every getConnection() call). Here we switch to
+    // RoundRobinConnectionStrategy so each getConnection() automatically
+    // advances to the next connection in the list.
+    //
+    // Uses LookupDao (SanityOrder with @LookupKey on orderId) because
+    // a simple get(key) is sufficient — no DetachedCriteria needed.
+    // -------------------------------------------------------------------------
+
+    @Test
+    void roundRobin_saveOrderAndReadBack() throws Exception {
+        val orderId = UUID.randomUUID().toString();
+
+        // 1. Switch reader to round-robin strategy
+//        setReaderStrategy(new RoundRobinConnectionStrategy());
+
+        // 2. Read via reader LookupDao — should be empty
+        //    (this getConnection() call returns conn_0 and advances to conn_1)
+        val before = readerOrderLookupDao.get(orderId);
+        assertTrue(before.isEmpty(), "Order should not exist before save");
+
+        // 3. Save via writer LookupDao (writer uses its own Tomcat pool, unaffected)
+        val order = SanityOrder.builder()
+                .orderId(orderId)
+                .customerId("customer-42")
+                .amount(500)
+                .build();
+        val saved = writerOrderLookupDao.save(order);
+        assertTrue(saved.isPresent(), "Writer save should succeed");
+
+        // 4. Read back via reader LookupDao
+        //    (this getConnection() call returns conn_1 — round-robin advanced)
+        val after = readerOrderLookupDao.get(orderId);
+        assertTrue(after.isPresent(), "Order must be visible via reader after writer commit");
+        assertEquals(orderId, after.get().getOrderId());
+        assertEquals("customer-42", after.get().getCustomerId());
+        assertEquals(500, after.get().getAmount());
     }
 
     // -------------------------------------------------------------------------
