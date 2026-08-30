@@ -42,4 +42,8 @@ public class SanityOrder {
 
     @Column(name = "amount")
     private int amount;
+
+    @Column(name = "updated_at", insertable = false, updatable = false,
+            columnDefinition = "TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP")
+    private java.sql.Timestamp updatedAt;
 }

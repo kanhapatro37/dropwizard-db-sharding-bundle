@@ -12,6 +12,7 @@ import io.appform.dropwizard.sharding.sanity.entities.SanityOrder;
 import io.appform.dropwizard.sharding.sanity.entities.SanityOrderItem;
 import io.appform.dropwizard.sharding.sharding.InMemoryLocalShardBlacklistingStore;
 import io.appform.dropwizard.sharding.sharding.ShardBlacklistingStore;
+import io.appform.dropwizard.sharding.utils.ShardCalculator;
 import io.dropwizard.Configuration;
 import io.dropwizard.db.DataSourceFactory;
 import io.dropwizard.jersey.DropwizardResourceConfig;
@@ -24,19 +25,19 @@ import io.dropwizard.util.Duration;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import lombok.val;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.MariaDBContainer;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -54,54 +55,128 @@ import static org.mockito.Mockito.when;
  *  │   └──────┬──────┘              └──────┬──────┘               │
  *  └──────────┼────────────────────────────┼──────────────────────┘
  *             │                            │
- *    ┌────────┴────────┐          ┌────────┴────────┐
- *    │  Writer Bundle  │          │  Reader Bundle  │
- *    │  (pool A)       │          │  (pool B)       │
- *    │  autoCommit=T   │          │  autoCommit=F   │
- *    │  hbm2ddl=create │          │  hbm2ddl=none   │
- *    └────────┬────────┘          └────────┬────────┘
- *             │                            │
- *      writerOrderItemDao           readerOrderItemDao
- *      writerOrderLookupDao         readerOrderLookupDao
+ *             └────────────┬───────────────┘
+ *                 ┌────────┴────────┐
+ *                 │     Bundle      │
+ *                 │  (Tomcat pool)  │
+ *                 │  hbm2ddl=create │
+ *                 │  pool: min=3    │
+ *                 │        max=3    │
+ *                 └────────┬────────┘
+ *                          │
+ *                  orderLookupDao
+ *                  orderItemDao
  * </pre>
  *
- * <h3>Container lifecycle</h3>
- * The MariaDB container is started <b>once</b> for the entire JVM via the singleton pattern
- * (static initializer). All test classes share the same container. The container is stopped
- * automatically when the JVM exits (Testcontainers registers a shutdown hook).
+ * <h3>Lifecycle</h3>
+ * All infrastructure (container, databases, bundle, connection pools, DAOs) is
+ * initialized <b>once</b> for the entire JVM and shared across all subclasses.
+ * Each test method gets a clean slate via {@link #truncateAllTables()} in
+ * {@code @BeforeEach}.
  *
- * <h3>Why two bundles</h3>
- * Two bundles = two separate connection pools = guaranteed different physical connections.
- * Writing via writer DAOs and reading via reader DAOs ensures cross-connection verification.
+ * <h3>Event tracing</h3>
+ * The bundle uses {@link TracingDataSourceFactory} which wraps the real Tomcat pool
+ * in a dynamic proxy to record JDBC lifecycle events ({@code GET_CONNECTION},
+ * {@code COMMIT}, {@code ROLLBACK}, {@code RELEASE_CONNECTION}) in {@link DbEventTracker}.
+ * A {@link TestTransactionInterceptor} is registered on each Hibernate SessionFactory
+ * to record {@code BEGIN_TRANSACTION} events.
+ *
+ * <p>Tests can use:
+ * <pre>
+ *   var result = checkpoint(() -&gt; dao.get(key));
+ *   assertTransactionEvents(result, 1, true);
+ * </pre>
  */
 @Slf4j
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 public abstract class SanityTestBase {
 
     // -------------------------------------------------------------------------
-    // MariaDB container — singleton, shared across ALL test classes in the JVM
+    // Shared infrastructure — initialized ONCE for the entire JVM
     // -------------------------------------------------------------------------
 
     private static final String SHARD_0_DB = "shard_0";
     private static final String SHARD_1_DB = "shard_1";
+    protected static final int NUM_SHARDS = 2;
 
-    /**
-     * Singleton container. Started once when this class is first loaded.
-     * Stopped automatically via JVM shutdown hook (Testcontainers default behavior).
-     *
-     * <p>We do NOT use {@code @Container} + {@code @Testcontainers} because those
-     * annotations manage lifecycle per-test-class, meaning a new container would start
-     * for every test class that extends this base. The singleton pattern starts it once.
-     */
-    protected static final MariaDBContainer<?> MARIADB;
+    private static final MariaDBContainer<?> MARIADB;
+    private static final DBShardingBundleBase<SanityTestConfig> BUNDLE;
+
+    protected static final LookupDao<SanityOrder> orderLookupDao;
+    protected static final RelationalDao<SanityOrderItem> orderItemDao;
 
     static {
+        // 1. Start MariaDB container
+//        MARIADB = new MariaDBContainer<>("mariadb:10.11")
+//                .withDatabaseName(SHARD_0_DB)
+//                .withUsername("test")
+//                .withPassword("test")
+//                .withCommand("--transaction-isolation=REPEATABLE-READ");
+//        MARIADB.start();
+
         MARIADB = new MariaDBContainer<>("mariadb:10.11")
                 .withDatabaseName(SHARD_0_DB)
                 .withUsername("test")
                 .withPassword("test")
-                .withCommand("--transaction-isolation=REPEATABLE-READ");
+                .withCommand("--transaction-isolation=READ-COMMITTED")
+                .withCreateContainerCmdModifier(cmd ->
+                        cmd.withHostConfig(cmd.getHostConfig()
+                                .withPortBindings(new com.github.dockerjava.api.model.PortBinding(
+                                        com.github.dockerjava.api.model.Ports.Binding.bindPort(3310),
+                                        new com.github.dockerjava.api.model.ExposedPort(3306)))));
         MARIADB.start();
+
+        // 2. Create second shard database
+        try {
+            createDatabase(SHARD_1_DB);
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to create shard_1 database", e);
+        }
+
+        // 3. Wire Dropwizard mocks
+        val healthChecks = mock(HealthCheckRegistry.class);
+        val jerseyEnvironment = mock(JerseyEnvironment.class);
+        when(jerseyEnvironment.getResourceConfig()).thenReturn(new DropwizardResourceConfig());
+        val lifecycleEnvironment = mock(LifecycleEnvironment.class);
+        val environment = mock(Environment.class);
+        when(environment.jersey()).thenReturn(jerseyEnvironment);
+        when(environment.lifecycle()).thenReturn(lifecycleEnvironment);
+        when(environment.healthChecks()).thenReturn(healthChecks);
+        when(environment.admin()).thenReturn(mock(AdminEnvironment.class));
+        val bootstrap = mock(Bootstrap.class);
+        when(bootstrap.getHealthCheckRegistry()).thenReturn(mock(HealthCheckRegistry.class));
+        when(bootstrap.getObjectMapper()).thenReturn(new ObjectMapper());
+
+        // 4. Build and initialize the bundle
+        String shard0Url = MARIADB.getJdbcUrl();
+        String shard1Url = shard0Url.replace("/" + SHARD_0_DB, "/" + SHARD_1_DB);
+
+
+        val config = new SanityTestConfig(ShardedHibernateFactory.builder()
+                .shards(List.of(buildDataSource(shard0Url), buildDataSource(shard1Url)))
+                .shardingOptions(ShardingBundleOptions.builder().build())
+                .build());
+
+        BUNDLE = new BalancedDBShardingBundle<SanityTestConfig>(
+                SanityOrder.class, SanityOrderItem.class) {
+            @Override
+            protected ShardedHibernateFactory getConfig(SanityTestConfig c) {
+                return c.getShards();
+            }
+
+            @Override
+            protected ShardBlacklistingStore getBlacklistingStore() {
+                return new InMemoryLocalShardBlacklistingStore();
+            }
+        };
+        BUNDLE.initialize(bootstrap);
+        BUNDLE.run(config, environment);
+
+        // 5. Create DAOs
+        orderLookupDao = BUNDLE.createParentObjectDao(SanityOrder.class);
+        orderItemDao = BUNDLE.createRelatedObjectDao(SanityOrderItem.class);
+
+        log.info("SanityTestBase: static initialization complete — bundle, pools, and DAOs ready");
     }
 
     // -------------------------------------------------------------------------
@@ -118,265 +193,10 @@ public abstract class SanityTestBase {
     }
 
     // -------------------------------------------------------------------------
-    // Mocked Dropwizard infrastructure
-    //
-    // These are "sink" mocks — bundle.run() calls methods on them (register
-    // health checks, lifecycle managed objects, admin tasks) and the mocks
-    // silently accept the calls. We never assert on them.
+    // Static helpers used during initialization
     // -------------------------------------------------------------------------
 
-    private final HealthCheckRegistry healthChecks = mock(HealthCheckRegistry.class);
-    private final JerseyEnvironment jerseyEnvironment = mock(JerseyEnvironment.class);
-    private final LifecycleEnvironment lifecycleEnvironment = mock(LifecycleEnvironment.class);
-    private final Environment environment = mock(Environment.class);
-    private final AdminEnvironment adminEnvironment = mock(AdminEnvironment.class);
-    private final Bootstrap<?> bootstrap = mock(Bootstrap.class);
-
-    // -------------------------------------------------------------------------
-    // Bundles and DAOs — available to subclasses
-    // -------------------------------------------------------------------------
-
-    protected DBShardingBundleBase<SanityTestConfig> writerBundle;
-    protected DBShardingBundleBase<SanityTestConfig> readerBundle;
-
-    protected LookupDao<SanityOrder> writerOrderLookupDao;
-    protected LookupDao<SanityOrder> readerOrderLookupDao;
-
-    protected RelationalDao<SanityOrderItem> writerOrderItemDao;
-    protected RelationalDao<SanityOrderItem> readerOrderItemDao;
-
-    // -------------------------------------------------------------------------
-    // Controlled connections for the reader bundle
-    //
-    // Instead of a Tomcat pool, the reader bundle uses pre-created JDBC
-    // connections. Tests can call readerShard0Ds.useConnection(n) to select
-    // which connection index is returned by getConnection().
-    // -------------------------------------------------------------------------
-
-    /** Controlled DataSource for reader shard 0 */
-    protected ControlledConnectionDataSource readerShard0Ds;
-    /** Controlled DataSource for reader shard 1 */
-    protected ControlledConnectionDataSource readerShard1Ds;
-
-    /** Raw JDBC connections backing the reader shard 0 controlled data source */
-    private final List<Connection> readerShard0Connections = new ArrayList<>();
-    /** Raw JDBC connections backing the reader shard 1 controlled data source */
-    private final List<Connection> readerShard1Connections = new ArrayList<>();
-
-    // -------------------------------------------------------------------------
-    // Setup — runs once before all tests in the subclass
-    // -------------------------------------------------------------------------
-
-    @BeforeAll
-    void setupBundles() throws SQLException {
-        wireDropwizardMocks();
-        createDatabase(SHARD_1_DB);
-
-        String shard0Url = MARIADB.getJdbcUrl();
-        String shard1Url = shard0Url.replace("/" + SHARD_0_DB, "/" + SHARD_1_DB);
-
-        // Writer bundle: creates schema, standard Tomcat pool (unchanged)
-        val writerConfig = buildShardConfig(shard0Url, shard1Url, true);
-        writerBundle = initBundle(writerConfig);
-        writerOrderLookupDao = writerBundle.createParentObjectDao(SanityOrder.class);
-        writerOrderItemDao = writerBundle.createRelatedObjectDao(SanityOrderItem.class);
-
-        // Reader bundle: controlled connections instead of a pool.
-        // Create 2 pre-made connections per shard (conn_0 and conn_1 for each shard).
-        // Tests can switch between them via readerShard0Ds.useConnection(n).
-//        int numConnectionsPerShard = getReaderConnectionsPerShard();
-//        for (int i = 0; i < numConnectionsPerShard; i++) {
-//            readerShard0Connections.add(createReaderConnection(shard0Url));
-//            readerShard1Connections.add(createReaderConnection(shard1Url));
-//        }
-//
-//        readerShard0Ds = new ControlledConnectionDataSource(readerShard0Connections);
-//        readerShard1Ds = new ControlledConnectionDataSource(readerShard1Connections);
-//
-//        val readerConfig = buildControlledShardConfig(shard0Url, shard1Url);
-//        readerBundle = initBundle(readerConfig);
-//        readerOrderLookupDao = readerBundle.createParentObjectDao(SanityOrder.class);
-//        readerOrderItemDao = readerBundle.createRelatedObjectDao(SanityOrderItem.class);
-        val readerConfig = buildShardConfig(shard0Url, shard1Url, true);
-        readerBundle = initBundle(readerConfig);
-        readerOrderLookupDao = readerBundle.createParentObjectDao(SanityOrder.class);
-        readerOrderItemDao = readerBundle.createRelatedObjectDao(SanityOrderItem.class);
-    }
-
-    @AfterAll
-    void closeControlledConnections() {
-        for (Connection conn : readerShard0Connections) {
-            try { conn.close(); } catch (SQLException e) { log.warn("Failed to close shard0 connection", e); }
-        }
-        for (Connection conn : readerShard1Connections) {
-            try { conn.close(); } catch (SQLException e) { log.warn("Failed to close shard1 connection", e); }
-        }
-    }
-
-    /**
-     * Number of pre-created connections per reader shard. Override in subclass
-     * if you need more than 2.
-     */
-    protected int getReaderConnectionsPerShard() {
-        return 2;
-    }
-
-    /**
-     * Selects which connection index the reader bundle will use for BOTH shards.
-     * Call this before a reader DAO operation to control which connection is used.
-     * Only meaningful when using {@link FixedConnectionStrategy} (the default).
-     *
-     * @param index 0-based index (default is 0)
-     */
-    protected void useReaderConnection(int index) {
-        readerShard0Ds.useConnection(index);
-        readerShard1Ds.useConnection(index);
-        log.info("Reader bundle now using connection index={}", index);
-    }
-
-    /**
-     * Switches the connection selection strategy on BOTH reader shard DataSources.
-     * <p>Example usage in a test:
-     * <pre>
-     *   // Switch to round-robin: each getConnection() auto-advances
-     *   setReaderStrategy(new RoundRobinConnectionStrategy());
-     *
-     *   // Switch back to fixed: caller controls which connection via useReaderConnection()
-     *   setReaderStrategy(new FixedConnectionStrategy());
-     * </pre>
-     *
-     * @param strategy the new strategy to apply to both reader shard DataSources
-     */
-    protected void setReaderStrategy(ConnectionSelectionStrategy strategy) {
-        readerShard0Ds.setStrategy(strategy);
-        readerShard1Ds.setStrategy(strategy);
-        log.info("Reader bundle strategy changed to {}", strategy.getClass().getSimpleName());
-    }
-
-    // -------------------------------------------------------------------------
-    // Internal helpers
-    // -------------------------------------------------------------------------
-
-    private void wireDropwizardMocks() {
-        when(jerseyEnvironment.getResourceConfig()).thenReturn(new DropwizardResourceConfig());
-        when(environment.jersey()).thenReturn(jerseyEnvironment);
-        when(environment.lifecycle()).thenReturn(lifecycleEnvironment);
-        when(environment.healthChecks()).thenReturn(healthChecks);
-        when(environment.admin()).thenReturn(adminEnvironment);
-        when(bootstrap.getHealthCheckRegistry()).thenReturn(mock(HealthCheckRegistry.class));
-        when(bootstrap.getObjectMapper()).thenReturn(new ObjectMapper());
-    }
-
-    private SanityTestConfig buildShardConfig(String shard0Url, String shard1Url, boolean isWriter) {
-        return new SanityTestConfig(ShardedHibernateFactory.builder()
-                .shards(List.of(
-                        buildDataSource(shard0Url, isWriter),
-                        buildDataSource(shard1Url, isWriter)))
-                .shardingOptions(ShardingBundleOptions.builder().build())
-                .build());
-    }
-
-    /**
-     * Builds a ShardConfig for the reader bundle that uses {@link ControlledDataSourceFactory}
-     * instead of real DataSourceFactory. This ensures the bundle's SessionFactoryFactory.build()
-     * receives our ControlledConnectionDataSource instead of a Tomcat pool.
-     */
-    private SanityTestConfig buildControlledShardConfig(String shard0Url, String shard1Url) {
-        return new SanityTestConfig(ShardedHibernateFactory.builder()
-                .shards(List.of(
-                        buildControlledDataSource(shard0Url, readerShard0Ds),
-                        buildControlledDataSource(shard1Url, readerShard1Ds)))
-                .shardingOptions(ShardingBundleOptions.builder().build())
-                .build());
-    }
-
-    /**
-     * Creates a ControlledDataSourceFactory that carries all the Hibernate properties
-     * (dialect, hbm2ddl=none) but returns the given ControlledConnectionDataSource
-     * when build() is called.
-     */
-    private ControlledDataSourceFactory buildControlledDataSource(String jdbcUrl,
-                                                                   ControlledConnectionDataSource controlledDs) {
-        val ds = new ControlledDataSourceFactory(controlledDs);
-        ds.setDriverClass("org.mariadb.jdbc.Driver");
-        ds.setUrl(jdbcUrl);
-        ds.setUser(MARIADB.getUsername());
-        ds.setPassword(MARIADB.getPassword());
-        ds.setValidationQuery("SELECT 1");
-
-        val props = new HashMap<>(Map.of(
-                "hibernate.dialect", "org.hibernate.dialect.MariaDBDialect",
-                "hibernate.hbm2ddl.auto", "none"));
-        ds.setProperties(props);
-
-        ds.setAutoCommitByDefault(false);
-        ds.setDefaultTransactionIsolation(DataSourceFactory.TransactionIsolation.REPEATABLE_READ);
-        return ds;
-    }
-
-    /**
-     * Creates a raw JDBC connection configured like the reader bundle would:
-     * autoCommit=false, REPEATABLE_READ isolation.
-     */
-    private Connection createReaderConnection(String jdbcUrl) throws SQLException {
-        Connection conn = DriverManager.getConnection(
-                jdbcUrl, MARIADB.getUsername(), MARIADB.getPassword());
-        conn.setAutoCommit(false);
-        conn.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
-        log.info("Created controlled reader connection: url={}, identityHash={}",
-                jdbcUrl, System.identityHashCode(conn));
-        return conn;
-    }
-
-    private DBShardingBundleBase<SanityTestConfig> initBundle(SanityTestConfig config) {
-        DBShardingBundleBase<SanityTestConfig> bundle =
-                new BalancedDBShardingBundle<SanityTestConfig>(
-                        SanityOrder.class, SanityOrderItem.class) {
-                    @Override
-                    protected ShardedHibernateFactory getConfig(SanityTestConfig c) {
-                        return c.getShards();
-                    }
-
-                    @Override
-                    protected ShardBlacklistingStore getBlacklistingStore() {
-                        return new InMemoryLocalShardBlacklistingStore();
-                    }
-                };
-        bundle.initialize(bootstrap);
-        bundle.run(config, environment);
-        return bundle;
-    }
-
-    private DataSourceFactory buildDataSource(String jdbcUrl, boolean isWriter) {
-        val ds = new DataSourceFactory();
-        ds.setDriverClass("org.mariadb.jdbc.Driver");
-        ds.setUrl(jdbcUrl);
-        ds.setUser(MARIADB.getUsername());
-        ds.setPassword(MARIADB.getPassword());
-        ds.setValidationQuery("SELECT 1");
-        ds.setMinSize(2);
-        ds.setMaxSize(4);
-        ds.setInitialSize(2);
-        ds.setUseFairQueue(false);
-        ds.setMaxConnectionAge(Duration.seconds(600));
-
-        val props = new HashMap<>(Map.of(
-                "hibernate.dialect", "org.hibernate.dialect.MariaDBDialect",
-                "hibernate.hbm2ddl.auto", isWriter ? "create" : "none"));
-        ds.setProperties(props);
-
-//        if (!isWriter) {
-            ds.setAutoCommitByDefault(false);
-            ds.setDefaultTransactionIsolation(DataSourceFactory.TransactionIsolation.REPEATABLE_READ);
-//        }
-        return ds;
-    }
-
-    /**
-     * Creates a database and grants the test user full access.
-     * Uses root because the test user only has privileges on shard_0 (created by the container).
-     */
-    private void createDatabase(String dbName) throws SQLException {
+    private static void createDatabase(String dbName) throws SQLException {
         String rootUrl = MARIADB.getJdbcUrl().replace("/" + SHARD_0_DB, "/");
         try (Connection conn = DriverManager.getConnection(rootUrl, "root", MARIADB.getPassword())) {
             conn.createStatement().execute("CREATE DATABASE IF NOT EXISTS " + dbName);
@@ -384,6 +204,246 @@ public abstract class SanityTestBase {
                     "GRANT ALL PRIVILEGES ON " + dbName + ".* TO '" + MARIADB.getUsername() + "'@'%'");
             conn.createStatement().execute("FLUSH PRIVILEGES");
         }
+    }
+
+
+    /**
+     * Builds a {@link TracingDataSourceFactory} for a single shard.
+     *
+     * <p>Uses {@link TracingDataSourceFactory} (extends {@link DataSourceFactory}) which
+     * creates a real Tomcat connection pool and wraps it in a dynamic proxy that records
+     * JDBC events in {@link DbEventTracker}.
+     *
+     * <p>Also registers {@link TestTransactionInterceptor} via the Hibernate property
+     * {@code hibernate.session_factory.interceptor} to capture BEGIN_TRANSACTION events.
+     *
+     * <p><b>Note:</b> {@code autoCommitByDefault} must NOT be set here. The sharding
+     * bundle's {@code SessionFactoryFactory.disableAutoCommit()} handles this — it calls
+     * {@code setAutoCommitByDefault(false)} on the DataSourceFactory before building the
+     * pool, mirroring production behavior.
+     */
+    private static DataSourceFactory buildDataSource(String jdbcUrl) {
+        val ds = new TracingDataSourceFactory();
+        ds.setDriverClass("org.mariadb.jdbc.Driver");
+        ds.setUrl(jdbcUrl);
+        ds.setUser(MARIADB.getUsername());
+        ds.setPassword(MARIADB.getPassword());
+        ds.setValidationQuery("SELECT 1");
+        ds.setMinSize(3);
+        ds.setMaxSize(3);
+        ds.setInitialSize(3);
+
+        val props = new HashMap<>(Map.of(
+                "hibernate.dialect", "org.hibernate.dialect.MariaDBDialect",
+                "hibernate.hbm2ddl.auto", "create",
+                "hibernate.session_factory.interceptor", TestTransactionInterceptor.class.getName()));
+        ds.setProperties(props);
+
+        return ds;
+    }
+
+    // -------------------------------------------------------------------------
+    // Checkpoint helpers — execute an operation and capture/assert DB events
+    // -------------------------------------------------------------------------
+
+    /**
+     * Result of a checkpoint: the captured events and the operation's return value.
+     */
+    @Getter
+    protected static class CheckpointResult<T> {
+        private final T value;
+        private final List<DbEventTracker.DbEvent> events;
+        private final boolean autoCommitDisabledThroughout;
+
+        CheckpointResult(T value, List<DbEventTracker.DbEvent> events, boolean autoCommitDisabledThroughout) {
+            this.value = value;
+            this.events = events;
+            this.autoCommitDisabledThroughout = autoCommitDisabledThroughout;
+        }
+    }
+
+    /**
+     * Executes a DAO operation inside a checkpoint: clears the tracker, runs the
+     * operation, captures events and autoCommit latch state.
+     */
+    protected <T> CheckpointResult<T> checkpoint(Supplier<T> operation) {
+        DbEventTracker.clear();
+        T value = operation.get();
+        return new CheckpointResult<>(
+                value,
+                DbEventTracker.getEvents(),
+                DbEventTracker.wasAutoCommitDisabledThroughout()
+        );
+    }
+
+    /**
+     * Overload for void operations.
+     */
+    protected CheckpointResult<Void> checkpoint(Runnable operation) {
+        DbEventTracker.clear();
+        operation.run();
+        return new CheckpointResult<>(
+                null,
+                DbEventTracker.getEvents(),
+                DbEventTracker.wasAutoCommitDisabledThroughout()
+        );
+    }
+
+    /**
+     * Asserts the exact event sequence for a transaction.
+     *
+     * <p>Expected pattern:
+     * <pre>
+     *   [BEGIN_TRANSACTION, GET_CONNECTION, PREPARE_STATEMENT × N, COMMIT/ROLLBACK, RELEASE_CONNECTION]
+     * </pre>
+     *
+     * <p>Validates: correct size, correct event at each position, and autoCommit
+     * was disabled throughout.
+     *
+     * @param result            the checkpoint result to assert on
+     * @param prepareStatements expected number of PREPARE_STATEMENT events
+     * @param committed         {@code true} for COMMIT, {@code false} for ROLLBACK
+     */
+    protected void assertTransactionEvents(CheckpointResult<?> result, int prepareStatements, boolean committed) {
+        val events = result.getEvents();
+        val terminalEvent = committed ? DbEventTracker.DbEvent.COMMIT : DbEventTracker.DbEvent.ROLLBACK;
+        int expectedSize = prepareStatements + 4; // BEGIN + GET_CONN + N*PREPARE + COMMIT/ROLLBACK + RELEASE
+
+        assertEquals(expectedSize, events.size(),
+                "Expected " + expectedSize + " events but got " + events.size() + ". Events: " + events);
+
+        int i = 0;
+        assertEquals(DbEventTracker.DbEvent.BEGIN_TRANSACTION, events.get(i++),
+                "Position 0: expected BEGIN_TRANSACTION. Events: " + events);
+        assertEquals(DbEventTracker.DbEvent.GET_CONNECTION, events.get(i++),
+                "Position 1: expected GET_CONNECTION. Events: " + events);
+        for (int p = 0; p < prepareStatements; p++) {
+            assertEquals(DbEventTracker.DbEvent.PREPARE_STATEMENT, events.get(i++),
+                    "Position " + (p + 2) + ": expected PREPARE_STATEMENT. Events: " + events);
+        }
+        assertEquals(terminalEvent, events.get(i++),
+                "Position " + (prepareStatements + 2) + ": expected " + terminalEvent.getLabel() + ". Events: " + events);
+        assertEquals(DbEventTracker.DbEvent.RELEASE_CONNECTION, events.get(i),
+                "Position " + (prepareStatements + 3) + ": expected RELEASE_CONNECTION. Events: " + events);
+
+        assertTrue(result.isAutoCommitDisabledThroughout(),
+                "autoCommit must be disabled throughout. Events: " + events);
+    }
+
+    /**
+     * Asserts transaction event structure without checking the number of PREPARE_STATEMENTs.
+     *
+     * <p>Validates only the bookend events:
+     * <pre>
+     *   position 0:   BEGIN_TRANSACTION
+     *   position 1:   GET_CONNECTION
+     *   ...           (any events in between — not checked)
+     *   position n-1: COMMIT or ROLLBACK
+     *   position n:   RELEASE_CONNECTION
+     * </pre>
+     *
+     * <p>Also validates autoCommit was disabled throughout and that at least 4 events
+     * exist (the minimum: BEGIN, GET_CONNECTION, COMMIT/ROLLBACK, RELEASE).
+     *
+     * @param result    the checkpoint result to assert on
+     * @param committed {@code true} for COMMIT, {@code false} for ROLLBACK
+     */
+    protected void assertTransactionEvents(CheckpointResult<?> result, boolean committed) {
+        val events = result.getEvents();
+        val terminalEvent = committed ? DbEventTracker.DbEvent.COMMIT : DbEventTracker.DbEvent.ROLLBACK;
+
+        assertTrue(events.size() >= 4,
+                "Expected at least 4 events but got " + events.size() + ". Events: " + events);
+
+        assertEquals(DbEventTracker.DbEvent.BEGIN_TRANSACTION, events.get(0),
+                "Position 0: expected BEGIN_TRANSACTION. Events: " + events);
+        assertEquals(DbEventTracker.DbEvent.GET_CONNECTION, events.get(1),
+                "Position 1: expected GET_CONNECTION. Events: " + events);
+        assertEquals(terminalEvent, events.get(events.size() - 2),
+                "Position " + (events.size() - 2) + ": expected " + terminalEvent.getLabel() + ". Events: " + events);
+        assertEquals(DbEventTracker.DbEvent.RELEASE_CONNECTION, events.get(events.size() - 1),
+                "Last position: expected RELEASE_CONNECTION. Events: " + events);
+
+        assertTrue(result.isAutoCommitDisabledThroughout(),
+                "autoCommit must be disabled throughout. Events: " + events);
+    }
+
+    /**
+     * Asserts the event sequence for scatter-gather operations that run one
+     * transaction per shard.
+     *
+     * <p>Expected pattern (repeated {@code numShards} times):
+     * <pre>
+     *   [BEGIN, GET_CONNECTION, PREPARE_STATEMENT × prepareStatementsPerShard, COMMIT/ROLLBACK, RELEASE_CONNECTION]
+     * </pre>
+     *
+     * @param result                    the checkpoint result to assert on
+     * @param numShards                 number of shards (= number of sequential transactions)
+     * @param prepareStatementsPerShard expected PREPARE_STATEMENT count per shard
+     * @param committed                 {@code true} for COMMIT, {@code false} for ROLLBACK
+     */
+    protected void assertScatterGatherEvents(CheckpointResult<?> result, int numShards,
+                                             int prepareStatementsPerShard, boolean committed) {
+        val events = result.getEvents();
+        val terminalEvent = committed ? DbEventTracker.DbEvent.COMMIT : DbEventTracker.DbEvent.ROLLBACK;
+        int eventsPerShard = prepareStatementsPerShard + 4; // BEGIN + GET_CONN + N*PREPARE + COMMIT/ROLLBACK + RELEASE
+        int expectedTotal = numShards * eventsPerShard;
+
+        assertEquals(expectedTotal, events.size(),
+                "Expected " + expectedTotal + " events (" + numShards + " shards × " + eventsPerShard +
+                        " events/shard) but got " + events.size() + ". Events: " + events);
+
+        for (int shard = 0; shard < numShards; shard++) {
+            int base = shard * eventsPerShard;
+            int i = base;
+            assertEquals(DbEventTracker.DbEvent.BEGIN_TRANSACTION, events.get(i++),
+                    "Shard " + shard + " position " + base + ": expected BEGIN_TRANSACTION. Events: " + events);
+            assertEquals(DbEventTracker.DbEvent.GET_CONNECTION, events.get(i++),
+                    "Shard " + shard + " position " + (base + 1) + ": expected GET_CONNECTION. Events: " + events);
+            for (int p = 0; p < prepareStatementsPerShard; p++) {
+                assertEquals(DbEventTracker.DbEvent.PREPARE_STATEMENT, events.get(i++),
+                        "Shard " + shard + " position " + (base + 2 + p) + ": expected PREPARE_STATEMENT. Events: " + events);
+            }
+            assertEquals(terminalEvent, events.get(i++),
+                    "Shard " + shard + " position " + (base + 2 + prepareStatementsPerShard) +
+                            ": expected " + terminalEvent.getLabel() + ". Events: " + events);
+            assertEquals(DbEventTracker.DbEvent.RELEASE_CONNECTION, events.get(i),
+                    "Shard " + shard + " position " + (base + 3 + prepareStatementsPerShard) +
+                            ": expected RELEASE_CONNECTION. Events: " + events);
+        }
+
+        assertTrue(result.isAutoCommitDisabledThroughout(),
+                "autoCommit must be disabled throughout. Events: " + events);
+    }
+
+    /**
+     * Queries a specific shard database directly via JDBC to check if an order item
+     * exists there. Bypasses the DAO/sharding layer entirely.
+     *
+     * @param shardIndex 0 or 1
+     * @param orderId    the order_id value
+     * @param itemName   the item_name value
+     * @return true if a row with that (order_id, item_name) exists on the specified shard
+     */
+    protected boolean existsOnShardItems(int shardIndex, String orderId, String itemName) throws SQLException {
+        String db = shardIndex == 0 ? SHARD_0_DB : SHARD_1_DB;
+        String url = MARIADB.getJdbcUrl().replace("/" + SHARD_0_DB, "/" + db);
+        try (Connection conn = DriverManager.getConnection(url, MARIADB.getUsername(), MARIADB.getPassword());
+             var ps = conn.prepareStatement("SELECT 1 FROM sanity_order_items WHERE order_id = ? AND item_name = ?")) {
+            ps.setString(1, orderId);
+            ps.setString(2, itemName);
+            try (var rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    /**
+     * Returns the JDBC URL for the MariaDB container (pointing to shard_0).
+     * Subclasses can use this for direct JDBC queries.
+     */
+    protected static String getMariaDbUrl() {
+        return MARIADB.getJdbcUrl();
     }
 
     /**
@@ -401,5 +461,60 @@ public abstract class SanityTestBase {
                 conn.createStatement().execute("SET FOREIGN_KEY_CHECKS = 1");
             }
         }
+    }
+
+    /**
+     * Queries a specific shard database directly via JDBC to check if an order
+     * exists there. Bypasses the DAO/sharding layer entirely.
+     *
+     * @param shardIndex 0 or 1
+     * @param orderId    the order_id value to search for
+     * @return true if a row with that order_id exists on the specified shard
+     */
+    protected boolean existsOnShard(int shardIndex, String orderId) throws SQLException {
+        String db = shardIndex == 0 ? SHARD_0_DB : SHARD_1_DB;
+        String url = MARIADB.getJdbcUrl().replace("/" + SHARD_0_DB, "/" + db);
+        try (Connection conn = DriverManager.getConnection(url, MARIADB.getUsername(), MARIADB.getPassword());
+             var ps = conn.prepareStatement("SELECT 1 FROM sanity_orders WHERE order_id = ?")) {
+            ps.setString(1, orderId);
+            try (var rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    /**
+     * Returns the shard index (0 or 1) that the sharding bundle would route
+     * the given orderId to, based on the Murmur3 hash.
+     */
+    protected int shardForKey(String orderId) {
+        // With 2 shards and BalancedShardManager:
+        // bucket = abs(murmur3_128(key)) % 1024
+        // shard 0: buckets [0, 511], shard 1: buckets [512, 1023]
+        int hash = com.google.common.hash.Hashing.murmur3_128()
+                .hashString(orderId, java.nio.charset.StandardCharsets.UTF_8)
+                .asInt();
+        hash = hash < 0 ? -hash : hash;
+        int bucket = hash % 1024;
+        return bucket < 512 ? 0 : 1;
+    }
+
+    /**
+     * Returns the number of distinct shards that the given keys will be routed to,
+     * as determined by the supplied {@link ShardCalculator}.
+     *
+     * <p>Usage: {@code uniqueShardCount(orderLookupDao.getShardCalculator(), keys)}
+     * or {@code uniqueShardCount(orderItemDao.getShardCalculator(), keys)} — any
+     * {@code ShardedDao}'s calculator works since shard keys are always {@code String}.
+     *
+     * @param shardCalculator the shard calculator to resolve each key's shard id with
+     * @param keys            the keys to bucket
+     * @return the count of distinct shard ids across all keys
+     */
+    protected int uniqueShardCount(ShardCalculator<String> shardCalculator, List<String> keys) {
+        return (int) keys.stream()
+                .map(shardCalculator::shardId)
+                .distinct()
+                .count();
     }
 }

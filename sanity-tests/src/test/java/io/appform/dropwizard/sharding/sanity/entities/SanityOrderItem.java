@@ -48,4 +48,8 @@ public class SanityOrderItem {
 
     @Column(name = "price")
     private int price;
+
+    @Column(name = "updated_at", insertable = false, updatable = false,
+            columnDefinition = "TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP")
+    private java.sql.Timestamp updatedAt;
 }
