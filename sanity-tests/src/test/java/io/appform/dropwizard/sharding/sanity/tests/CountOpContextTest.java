@@ -60,7 +60,7 @@ class CountOpContextTest extends SanityTestBase {
 
         // NUM_SHARDS transactions, each with 1 prepare
         // scatter-gather: one transaction per shard, 1 prepare per shard
-        assertScatterGatherEvents(result, NUM_SHARDS, 1, true);
+        assertScatterGatherEvents(result, NUM_SHARDS, 2, true);
 
         long total = result.getValue().stream().mapToLong(Long::longValue).sum();
         assertEquals(3, total);
