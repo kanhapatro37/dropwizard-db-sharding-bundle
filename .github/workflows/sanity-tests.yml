@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       bundle_version:
-        description: 'Bundle version to test against (e.g. 2.1.12-7)'
+        description: 'Override: specific bundle version to test against (leave blank to use current branch state)'
         required: false
-        default: '2.1.12-9'
+        default: ''
 
 jobs:
   sanity:
@@ -31,14 +31,23 @@ jobs:
           restore-keys: ${{ runner.os }}-m2-sanity
 
       # Install the bundle jar into local Maven repo so sanity-tests can resolve it
-      - name: Build bundle
-        run: mvn -B install -DskipTests -q
+      - name: Build and install the bundle (db-sharding-bundle)
+        run: mvn -B -DskipTests clean install -q
+
+      # Ask the bundle's own pom.xml what version it currently is — the single source of truth
+      - name: Read the bundle's actual version
+        id: bundle_version
+        run: |
+          VERSION=$(mvn -q -Dexpression=project.version -DforceStdout help:evaluate)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       # Run sanity tests (Docker is pre-installed on ubuntu-latest runners)
-      - name: Run sanity tests
+      - name: Run sanity tests (sanity-tests)
         working-directory: sanity-tests
         run: |
-          VERSION="${{ github.event.inputs.bundle_version || '2.1.12-9' }}"
+          OVERRIDE="${{ github.event.inputs.bundle_version }}"
+          VERSION="${OVERRIDE:-${{ steps.bundle_version.outputs.version }}}"
+          echo "Testing against bundle version: $VERSION"
           mvn -B test -Dsharding.bundle.version=${VERSION}
 
       - name: Upload test reports
