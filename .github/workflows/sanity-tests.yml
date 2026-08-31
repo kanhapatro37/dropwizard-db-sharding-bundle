@@ -1,0 +1,49 @@
+name: Run Sanity Tests
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      bundle_version:
+        description: 'Bundle version to test against (e.g. 2.1.12-7)'
+        required: false
+        default: '2.1.12-9'
+
+jobs:
+  sanity:
+    name: Sanity Tests (MariaDB)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: 17
+          distribution: 'zulu'
+
+      - name: Cache Maven packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2
+          key: ${{ runner.os }}-m2-sanity-${{ hashFiles('sanity-tests/pom.xml', 'pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2-sanity
+
+      # Install the bundle jar into local Maven repo so sanity-tests can resolve it
+      - name: Build bundle
+        run: mvn -B install -DskipTests -q
+
+      # Run sanity tests (Docker is pre-installed on ubuntu-latest runners)
+      - name: Run sanity tests
+        working-directory: sanity-tests
+        run: |
+          VERSION="${{ github.event.inputs.bundle_version || '2.1.12-9' }}"
+          mvn -B test -Dsharding.bundle.version=${VERSION}
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanity-test-reports
+          path: sanity-tests/target/surefire-reports/
